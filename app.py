@@ -2,12 +2,27 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import sys
 import datetime
 from io import BytesIO
 
-from src.parser import load_and_validate_inputs, parse_master_data_file
-from src.transformer import transform_to_autoline_data
-from src.exporter import generate_output_excel
+# Ensure current directory is in sys.path for Streamlit Cloud Linux environment
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+try:
+    from src.parser import load_and_validate_inputs, parse_master_data_file
+    from src.transformer import transform_to_autoline_data
+    from src.exporter import generate_output_excel
+except ImportError:
+    try:
+        from parser import load_and_validate_inputs, parse_master_data_file
+        from transformer import transform_to_autoline_data
+        from exporter import generate_output_excel
+    except Exception as e:
+        st.error(f"Import Error: {e}. กรุณาตรวจสอบว่ามี requirements.txt และโฟลเดอร์ src/ ครบถ้วนบน GitHub")
+        raise e
 
 st.set_page_config(
     page_title="Autoline Excel Interface Bridge",
