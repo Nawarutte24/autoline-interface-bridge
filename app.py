@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import json
 import os
 import sys
@@ -68,7 +67,7 @@ def resolve_branch_by_invoice(invoice_number):
         return "01"
 
 # =============================================================================
-# 2. TEMPLATE GENERATORS
+# 2. TEMPLATE GENERATOR
 # =============================================================================
 def get_base_autoline_workbook(template_path=None):
     if template_path and os.path.exists(template_path):
@@ -106,31 +105,6 @@ def get_base_autoline_workbook(template_path=None):
             ws.cell(5, idx).value = h
             
     return wb
-
-def get_master_template_bytes():
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
-    
-    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="1E88E5", end_color="1E88E5", fill_type="solid")
-    
-    ws1 = wb.create_sheet(title="Customer_Subaccount")
-    ws1.append(["customer_code", "customer_name", "tax_ID", "autoline_subaccount", "terms", "tax_group", "remark"])
-    ws1.append(["1624", "บริษัท มาสเตอร์ ไดรฟเวอร์ แอนด์ เซอร์วิสเซส ( ประเทศไทย ) จำกัด", "0105550078073", "A0011", 30, "U", "ลูกหนี้บริษัท"])
-    ws1.append(["2357", "คุณ ภูมิธเนษฐ์ นพสุวรรณวงศ์", "", "A0011", 30, "U", "ลูกค้าทั่วไป"])
-    ws1.append(["DEFAULT", "ค่าเริ่มต้น", "", "A0011", 30, "U", "รหัสกลาง"])
-    
-    for ws in wb.worksheets:
-        for col_idx in range(1, ws.max_column + 1):
-            c = ws.cell(row=1, column=col_idx)
-            c.font = header_font
-            c.fill = header_fill
-            c.alignment = Alignment(horizontal="center")
-            
-    out = BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return out
 
 # =============================================================================
 # 3. PROCESSING & TRANSFORMATION ENGINE
@@ -177,26 +151,7 @@ def load_and_validate_inputs(header_file, detail_file):
         
     return df_header, df_detail
 
-def parse_master_data_file(master_file):
-    xl = pd.ExcelFile(master_file)
-    master_dict = {"customers": {}}
-    
-    for s in xl.sheet_names:
-        s_low = s.lower()
-        if "customer" in s_low or "subaccount" in s_low:
-            df_c = pd.read_excel(master_file, sheet_name=s)
-            for _, r in df_c.iterrows():
-                code = str(r.get("customer_code", "")).strip()
-                tax_id = str(r.get("tax_ID", "")).strip()
-                sub = str(r.get("autoline_subaccount", "")).strip()
-                terms = r.get("terms", 30)
-                if code and sub:
-                    master_dict["customers"][code] = {"subaccount": sub, "terms": terms}
-                if tax_id and sub:
-                    master_dict["customers"][tax_id] = {"subaccount": sub, "terms": terms}
-    return master_dict
-
-def transform_to_autoline_data(df_header, df_detail, master_dict=None):
+def transform_to_autoline_data(df_header, df_detail):
     rows_to_write = []
     preview_records = []
     
@@ -204,10 +159,6 @@ def transform_to_autoline_data(df_header, df_detail, master_dict=None):
     total_debit_sum = 0.0
     total_credit_sum = 0.0
     total_tax_sum = 0.0
-    
-    if master_dict is None:
-        master_dict = {}
-    cust_master = master_dict.get("customers", {})
     
     detail_by_inv = {inv: grp for inv, grp in df_detail.groupby("invoice_number")}
         
@@ -230,20 +181,8 @@ def transform_to_autoline_data(df_header, df_detail, master_dict=None):
         h_tax = float(h_row.get("sales_tax", 0.0))
         h_total = float(h_row.get("total", 0.0))
         
-        # Subaccount lookup
-        cust_code = str(h_row.get("customer_code", "")).strip()
-        tax_id = str(h_row.get("tax_ID", "")).strip()
         subaccount = AUTOMATED_CONFIG["subaccount_default"]
         terms_val = AUTOMATED_CONFIG["terms"]
-        
-        if cust_code in cust_master:
-            subaccount = cust_master[cust_code].get("subaccount", subaccount)
-            terms_val = int(cust_master[cust_code].get("terms", terms_val))
-        elif tax_id in cust_master:
-            subaccount = cust_master[tax_id].get("subaccount", subaccount)
-            terms_val = int(cust_master[tax_id].get("terms", terms_val))
-            
-        # Branch resolution from 2 leading digits of invoice_number
         src_branch = resolve_branch_by_invoice(inv_no)
         
         d_group = detail_by_inv.get(inv_no, pd.DataFrame())
@@ -502,7 +441,7 @@ def generate_output_excel(template_path, rows_to_write):
     return output_stream
 
 # =============================================================================
-# 4. STREAMLIT USER INTERFACE (CLEAN ZERO-TOUCH UI)
+# 4. STREAMLIT USER INTERFACE (MINIMALIST & ULTRA CLEAN)
 # =============================================================================
 st.set_page_config(
     page_title="Autoline Interface Bridge",
@@ -524,13 +463,6 @@ st.markdown("""
         color: #546E7A;
         margin-bottom: 1.5rem;
     }
-    .status-box {
-        background-color: #E3F2FD;
-        border-left: 5px solid #1E88E5;
-        padding: 0.8rem 1.2rem;
-        border-radius: 4px;
-        margin-bottom: 1.2rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -538,16 +470,8 @@ base_dir = os.path.dirname(__file__)
 template_path = os.path.join(base_dir, "data", "output_template.xlsx")
 
 # Main Header
-st.markdown('<div class="main-header">🚗 Autoline Interface Bridge (DealerPro ➔ Autoline)</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🚗 Autoline Interface Bridge</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">ระบบแปลงข้อมูลบิลบริการและอะไหล่อัตโนมัติ เข้าสู่แบบฟอร์ม Autoline AR/AP Journal Import</div>', unsafe_allow_html=True)
-
-st.markdown("""
-<div class="status-box">
-    <strong>⚡️ กฎการแปลงข้อมูลอัตโนมัติ (Fixed Mapping Rules):</strong><br>
-    • <strong>DEPARTMENT:</strong> งานอะไหล่ = <code>4002</code> | งานบริการ (ค่าแรง/Sublet) = <code>5002</code> | ลูกหนี้ AR = <code>0000</code><br>
-    • <strong>BRANCH:</strong> ดูจาก 2 หลักแรกของเลขที่บิล (<code>01, 03..09</code> ➔ <code>01</code> | <code>02</code> ➔ <code>02</code>)
-</div>
-""", unsafe_allow_html=True)
 
 col_up1, col_up2 = st.columns(2)
 with col_up1:
@@ -559,40 +483,13 @@ with col_up2:
     st.subheader("2. อัปโหลดไฟล์ DETAIL")
     st.caption("ไฟล์ที่มีรายการแยกตามหมวด อะไหล่ P, ค่าแรง L, บริการ S")
     detail_file = st.file_uploader("เลือกไฟล์ DETAIL (.xlsx)", type=["xlsx", "xls"], key="detail_upload")
-    
-with st.expander("📎 (ทางเลือก) อัปโหลด Master Data ลูกค้า / ดาวน์โหลดเทมเพลต", expanded=False):
-    col_m1, col_m2 = st.columns([2, 1])
-    with col_m1:
-        master_file = st.file_uploader(
-            "อัปโหลดไฟล์ Master Data ลูกหนี้ (.xlsx)",
-            type=["xlsx", "xls"],
-            key="master_upload"
-        )
-    with col_m2:
-        st.write("")
-        st.write("")
-        st.download_button(
-            label="⬇️ โหลดเทมเพลต Master Data",
-            data=get_master_template_bytes(),
-            file_name="Master_Data_Template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-
-master_dict = None
-if master_file:
-    try:
-        master_dict = parse_master_data_file(master_file)
-        st.success(f"✅ โหลด Master Data สำเร็จ! (พบข้อมูลลูกค้า {len(master_dict.get('customers', {}))} ราย)")
-    except Exception as e:
-        st.warning(f"ไม่สามารถอ่านไฟล์ Master Data ได้: {str(e)}")
 
 if header_file and detail_file:
     try:
         with st.spinner("กำลังแปลงข้อมูลและคำนวณดุลบัญชีอัตโนมัติ..."):
             df_header, df_detail = load_and_validate_inputs(header_file, detail_file)
             rows_to_write, summary_stats, preview_df = transform_to_autoline_data(
-                df_header, df_detail, master_dict=master_dict
+                df_header, df_detail
             )
             
         st.success("✅ แปลงข้อมูลสำเร็จเรียบร้อย!")
