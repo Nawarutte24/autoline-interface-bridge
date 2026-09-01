@@ -8,16 +8,10 @@ def clean_first_name(advisor_name):
     parts = name_str.split()
     return parts[0] if parts else name_str
 
-def transform_to_autoline_data(df_header, df_detail, config):
+def transform_to_autoline_data(df_header, df_detail, config, master_dict=None):
     """
     Transforms Header and Detail DataFrames into Autoline AR/AP Journal rows.
-    Ensures 100% accounting balance: DEBIT = Sum(CREDIT) + TOTALTAX.
-    
-    Structure per invoice:
-      1. Document Header Row
-      2. Blank Row (Row 8 style)
-      3. Line 1: DEBIT (AR Control Account - Total Gross Value)
-      4. Line 2..N: CREDIT (Revenue by Category: Parts, Labor, Sublet)
+    Supports Master Data lookups for Customers, Branches, and GL codes.
     """
     rows_to_write = []
     preview_records = []
@@ -27,10 +21,15 @@ def transform_to_autoline_data(df_header, df_detail, config):
     total_credit_sum = 0.0
     total_tax_sum = 0.0
     
+    if master_dict is None:
+        master_dict = {}
+    cust_master = master_dict.get("customers", {})
+    branch_master = master_dict.get("branches", {})
+    gl_master = master_dict.get("gl_rules", {})
+    
     # Group detail by invoice_number
     detail_by_inv = {inv: grp for inv, grp in df_detail.groupby("invoice_number")}
         
-    # Iterate through each invoice in header
     for _, h_row in df_header.iterrows():
         inv_no = str(h_row["invoice_number"]).strip()
         if not inv_no:
@@ -51,10 +50,32 @@ def transform_to_autoline_data(df_header, df_detail, config):
         h_tax = float(h_row.get("sales_tax", 0.0))
         h_total = float(h_row.get("total", 0.0))
         
+        # Lookup Subaccount & Terms
+        cust_code = str(h_row.get("customer_code", "")).strip()
+        tax_id = str(h_row.get("tax_ID", "")).strip()
+        
+        subaccount = config.get("subaccount_default", "A0011")
+        terms_val = int(config.get("terms", 30))
+        
+        if cust_code in cust_master:
+            subaccount = cust_master[cust_code].get("subaccount", subaccount)
+            terms_val = int(cust_master[cust_code].get("terms", terms_val))
+        elif tax_id in cust_master:
+            subaccount = cust_master[tax_id].get("subaccount", subaccount)
+            terms_val = int(cust_master[tax_id].get("terms", terms_val))
+            
+        # Lookup Branch
+        dealer_pfx = str(h_row.get("dealer_prefix", "")).strip().upper()
+        branch_name_val = str(h_row.get("branch_name", "")).strip().lower()
+        src_branch = config.get("src_branch", "0001")
+        if dealer_pfx in branch_master:
+            src_branch = branch_master[dealer_pfx]
+        elif branch_name_val in branch_master:
+            src_branch = branch_master[branch_name_val]
+        
         # Get details for this invoice
         d_group = detail_by_inv.get(inv_no, pd.DataFrame())
         
-        # Calculate category sales allocation
         cat_sales = {}
         has_parts = False
         has_service = False
@@ -70,7 +91,6 @@ def transform_to_autoline_data(df_header, df_detail, config):
                 cat_name = list(valid_cats.keys())[0]
                 cat_sales[cat_name] = round(h_nett, 2)
             elif len(valid_cats) > 1:
-                # Multi-category: allocate h_nett by tax or sales weight
                 total_tax_valid = sum(valid_tax_cats.values())
                 if total_tax_valid > 0:
                     allocated = 0.0
@@ -99,15 +119,12 @@ def transform_to_autoline_data(df_header, df_detail, config):
         if any(cat_sales.get(c, 0) > 0 for c in ["L", "S"]):
             has_service = True
                 
-        # Determine DOCSEQ: PINVOICE for parts-only, SINVOICE for service / mixed
+        # Determine DOCSEQ
         if has_parts and not has_service:
-            doc_seq = config["parts"].get("doc_seq", "PINVOICE")
+            doc_seq = gl_master.get("P", {}).get("doc_seq") or config["parts"].get("doc_seq", "PINVOICE")
         else:
-            doc_seq = config["labor"].get("doc_seq", "SINVOICE")
+            doc_seq = gl_master.get("L", {}).get("doc_seq") or config["labor"].get("doc_seq", "SINVOICE")
             
-        subaccount = config.get("subaccount_default", "A0011")
-        src_branch = config.get("src_branch", "0001")
-        
         # -------------------------------------------------------------
         # 1. Document Header Row
         # -------------------------------------------------------------
@@ -135,7 +152,7 @@ def transform_to_autoline_data(df_header, df_detail, config):
             "T": None,
             "U": config.get("tax_group", "U"),
             "V": None,
-            "W": int(config.get("terms", 30)),
+            "W": terms_val,
             "X": src_branch,
             "Y": None
         }
@@ -159,13 +176,16 @@ def transform_to_autoline_data(df_header, df_detail, config):
         })
         
         # -------------------------------------------------------------
-        # 2. Blank Row between Header and Lines (Row 8 style)
+        # 2. Blank Row between Header and Lines
         # -------------------------------------------------------------
         rows_to_write.append({"type": "BLANK"})
         
         # -------------------------------------------------------------
-        # 3. Line 1: DEBIT Line (AR Control Account) -> UP FIRST
+        # 3. Line 1: DEBIT Line (AR Control Account)
         # -------------------------------------------------------------
+        ar_gl = gl_master.get("AR", {}).get("gl_code") or str(config.get("ar_gl_code", "11311001"))
+        ar_dept = gl_master.get("AR", {}).get("department") or str(config.get("ar_department", "0000"))
+        
         debit_record = {
             "type": "ITEM",
             "B": None,
@@ -174,12 +194,12 @@ def transform_to_autoline_data(df_header, df_detail, config):
             "E": None,
             "F": None,
             "G": config.get("currency", "THB"),
-            "H": 1,  # Line 1
+            "H": 1,
             "I": src_branch,
-            "J": config.get("ar_department", "0000"),
-            "K": int(config.get("ar_gl_code", "11311001")),
+            "J": ar_dept,
+            "K": int(ar_gl),
             "L": None,
-            "M": h_total,  # DEBIT = Total Value (Sales + Tax)
+            "M": h_total,
             "N": None,
             "O": narrative,
             "P": None,
@@ -209,8 +229,8 @@ def transform_to_autoline_data(df_header, df_detail, config):
             "Doc Code": "",
             "Doc Seq": "",
             "Date": doc_date.strftime("%Y-%m-%d"),
-            "GL Code": str(config.get("ar_gl_code", "11311001")),
-            "Department": str(config.get("ar_department", "0000")),
+            "GL Code": ar_gl,
+            "Department": ar_dept,
             "Debit": h_total,
             "Credit": "",
             "Tax": "",
@@ -220,37 +240,45 @@ def transform_to_autoline_data(df_header, df_detail, config):
         })
         
         # -------------------------------------------------------------
-        # 4. Line 2+: CREDIT Lines (Revenue by Category: P, L, S)
+        # 4. Line 2+: CREDIT Lines
         # -------------------------------------------------------------
         line_num = 2
-        
         for cat, amount in cat_sales.items():
             if amount <= 0:
                 continue
                 
+            m_rule = gl_master.get(cat, {})
+            
             if cat == "P":
                 cfg = config["parts"]
-                partfran = cfg.get("partfran", "J")
-                partprod = cfg.get("partprod", "A")
+                gl_code_val = int(m_rule.get("gl_code") or cfg.get("gl_code", "41211004"))
+                dept_val = str(m_rule.get("department") or cfg.get("department", "4002"))
+                tax_code_val = m_rule.get("tax_code") or cfg.get("tax_code", "S")
+                aftstype_val = m_rule.get("aftstype") or cfg.get("aftstype", "R")
+                partfran = m_rule.get("partfran") or cfg.get("partfran", "J")
+                partprod = m_rule.get("partprod") or cfg.get("partprod", "A")
                 servprod = None
                 servicefranc = None
             elif cat == "L":
                 cfg = config["labor"]
+                gl_code_val = int(m_rule.get("gl_code") or cfg.get("gl_code", "41111001"))
+                dept_val = str(m_rule.get("department") or cfg.get("department", "4001"))
+                tax_code_val = m_rule.get("tax_code") or cfg.get("tax_code", "S")
+                aftstype_val = m_rule.get("aftstype") or cfg.get("aftstype", "R")
                 partfran = None
                 partprod = None
-                servprod = cfg.get("servprod", "A")
-                servicefranc = cfg.get("servicefranc", "JEEP")
-            else: # S or other
+                servprod = m_rule.get("servprod") or cfg.get("servprod", "A")
+                servicefranc = m_rule.get("servicefranc") or cfg.get("servicefranc", "JEEP")
+            else: # S
                 cfg = config["sublet"]
+                gl_code_val = int(m_rule.get("gl_code") or cfg.get("gl_code", "41311001"))
+                dept_val = str(m_rule.get("department") or cfg.get("department", "4003"))
+                tax_code_val = m_rule.get("tax_code") or cfg.get("tax_code", "S")
+                aftstype_val = m_rule.get("aftstype") or cfg.get("aftstype", "R")
                 partfran = None
                 partprod = None
-                servprod = cfg.get("servprod", "A")
-                servicefranc = cfg.get("servicefranc", "JEEP")
-                
-            gl_code_val = int(cfg.get("gl_code", "41211004"))
-            dept_val = str(cfg.get("department", "4002"))
-            tax_code_val = cfg.get("tax_code", "S")
-            aftstype_val = cfg.get("aftstype", "R")
+                servprod = m_rule.get("servprod") or cfg.get("servprod", "A")
+                servicefranc = m_rule.get("servicefranc") or cfg.get("servicefranc", "JEEP")
             
             credit_record = {
                 "type": "ITEM",
@@ -266,7 +294,7 @@ def transform_to_autoline_data(df_header, df_detail, config):
                 "K": gl_code_val,
                 "L": None,
                 "M": None,
-                "N": amount,  # CREDIT = Net sales
+                "N": amount,
                 "O": narrative,
                 "P": None,
                 "Q": tax_code_val,
@@ -304,7 +332,6 @@ def transform_to_autoline_data(df_header, df_detail, config):
                 "Narrative": narrative,
                 "Subaccount": ""
             })
-            
             line_num += 1
             
         total_tax_sum += h_tax
