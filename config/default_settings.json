@@ -1,0 +1,38 @@
+{
+  "journal_desc": "After Sale",
+  "doc_code": "ARI",
+  "currency": "THB",
+  "tax_group": "U",
+  "terms": 30,
+  "src_branch": "0001",
+  "subaccount_default": "A0011",
+  "ar_gl_code": "11311001",
+  "ar_department": "0000",
+  "parts": {
+    "doc_seq": "PINVOICE",
+    "gl_code": "41211004",
+    "department": "4002",
+    "tax_code": "S",
+    "aftstype": "R",
+    "partfran": "J",
+    "partprod": "A"
+  },
+  "labor": {
+    "doc_seq": "SINVOICE",
+    "gl_code": "41111001",
+    "department": "4001",
+    "tax_code": "S",
+    "aftstype": "R",
+    "servprod": "A",
+    "servicefranc": "JEEP"
+  },
+  "sublet": {
+    "doc_seq": "SINVOICE",
+    "gl_code": "41311001",
+    "department": "4003",
+    "tax_code": "S",
+    "aftstype": "R",
+    "servprod": "A",
+    "servicefranc": "JEEP"
+  }
+}
