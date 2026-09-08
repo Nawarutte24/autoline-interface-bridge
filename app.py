@@ -123,6 +123,22 @@ def load_and_validate_inputs(header_file, detail_file):
     df_header = df_header[df_header["invoice_number"] != ""].copy()
     df_detail = df_detail[df_detail["invoice_number"] != ""].copy()
     
+    if "Preview_Document" in df_header.columns:
+        df_header["Preview_Document"] = df_header["Preview_Document"].fillna("").astype(str).str.strip()
+        df_header.loc[df_header["Preview_Document"].str.lower() == "nan", "Preview_Document"] = ""
+    else:
+        df_header["Preview_Document"] = ""
+        
+    if "transaction_type" in df_header.columns:
+        df_header["transaction_type"] = df_header["transaction_type"].fillna("").astype(str).str.strip().str.upper()
+    else:
+        df_header["transaction_type"] = ""
+        
+    for c in ["customer_name", "repair_order_number"]:
+        if c in df_header.columns:
+            df_header[c] = df_header[c].fillna("").astype(str).str.strip()
+            df_header.loc[df_header[c].str.lower() == "nan", c] = ""
+            
     df_detail["category"] = df_detail["category"].fillna("").astype(str).str.strip().str.upper()
     
     for col in ["sales", "sales_tax", "nett_price", "discount_amount"]:
@@ -147,7 +163,18 @@ def transform_to_autoline_data(df_header, df_detail):
     batch_idx = 1
     total_debit_sum = 0.0
     total_credit_sum = 0.0
-    total_tax_sum = 0.0
+    
+    inv_revenue = 0.0
+    inv_tax = 0.0
+    inv_ar = 0.0
+    
+    cn_revenue = 0.0
+    cn_tax = 0.0
+    cn_ar = 0.0
+    
+    count_inv = 0
+    count_cn = 0
+    unbalanced_docs = []
     
     detail_by_inv = {inv: grp for inv, grp in df_detail.groupby("invoice_number")}
         
@@ -162,75 +189,132 @@ def transform_to_autoline_data(df_header, df_detail):
         else:
             doc_date = doc_date.to_pydatetime() if isinstance(doc_date, pd.Timestamp) else doc_date
             
-        cust_name = str(h_row.get("customer_name", "")).strip() if pd.notna(h_row.get("customer_name")) else ""
-        ro_no = str(h_row.get("repair_order_number", "")).strip() if pd.notna(h_row.get("repair_order_number")) else ""
-        
-        # Col N: (invoice_number)_(customer_name)_(repair_order_number)
-        if ro_no and cust_name:
-            misc_ref = f"{inv_no}_{cust_name}_{ro_no}"
-        elif cust_name:
-            misc_ref = f"{inv_no}_{cust_name}"
-        elif ro_no:
-            misc_ref = f"{inv_no}_{ro_no}"
-        else:
-            misc_ref = inv_no
-            
-        narrative = misc_ref
-        
+        trans_type = str(h_row.get("transaction_type", "")).strip().upper()
         h_nett = float(h_row.get("nett_price", 0.0))
         h_tax = float(h_row.get("sales_tax", 0.0))
         h_total = float(h_row.get("total", 0.0))
+        prev_doc = str(h_row.get("Preview_Document", "")).strip() if pd.notna(h_row.get("Preview_Document")) else ""
+        if prev_doc.lower() == "nan":
+            prev_doc = ""
+            
+        # ตรวจสอบว่าเป็นใบลดหนี้ (Credit Note - CN) หรือไม่
+        is_cn = (trans_type == "C") or (h_total < 0)
+        
+        doc_code = "ARC" if is_cn else "ARI"
+        doc_seq = "SCREDITV" if is_cn else "SINVOICV"
+        
+        doc_nett = round(abs(h_nett), 2)
+        doc_tax = round(abs(h_tax), 2)
+        doc_total = round(abs(h_total), 2)
+        
+        cust_name = str(h_row.get("customer_name", "")).strip() if pd.notna(h_row.get("customer_name")) else ""
+        if cust_name.lower() == "nan":
+            cust_name = ""
+        ro_no = str(h_row.get("repair_order_number", "")).strip() if pd.notna(h_row.get("repair_order_number")) else ""
+        if ro_no.lower() == "nan":
+            ro_no = ""
+        
+        # Col N: MISCREFERENCE
+        # สำหรับ CN: รวม prev_doc ด้วย -> f"{inv_no}_{prev_doc}_{cust_name}_{ro_no}"
+        # สำหรับ Invoice ปกติ: f"{inv_no}_{cust_name}_{ro_no}"
+        if is_cn and prev_doc:
+            parts = [inv_no, prev_doc, cust_name, ro_no]
+        else:
+            parts = [inv_no, cust_name, ro_no]
+        misc_ref = "_".join([p for p in parts if p])
+        narrative = misc_ref
         
         subaccount = AUTOMATED_CONFIG["subaccount_default"]
         terms_val = AUTOMATED_CONFIG["terms"]
         src_branch = resolve_branch_by_invoice(inv_no)
         
-        d_group = detail_by_inv.get(inv_no, pd.DataFrame())
+        # Detail lookup: สำหรับ CN ให้อ้างอิง Preview_Document ใน Detail ก่อน
+        lookup_inv = prev_doc if (is_cn and prev_doc and prev_doc in detail_by_inv) else inv_no
+        d_group = detail_by_inv.get(lookup_inv, pd.DataFrame())
         
         cat_sales = {}
         if not d_group.empty:
             cat_sums = d_group.groupby("category")["sales"].sum().to_dict()
             cat_tax_sums = d_group.groupby("category")["sales_tax"].sum().to_dict()
             
-            valid_cats = {k: v for k, v in cat_sums.items() if v > 0 and k in ["P", "L", "S"]}
-            valid_tax_cats = {k: v for k, v in cat_tax_sums.items() if v > 0 and k in ["P", "L", "S"]}
+            valid_cats = {k: v for k, v in cat_sums.items() if v > 0 and k in ["P", "L", "S", "C"]}
+            valid_tax_cats = {k: v for k, v in cat_tax_sums.items() if v > 0 and k in ["P", "L", "S", "C"]}
             
-            if len(valid_cats) == 1:
-                cat_name = list(valid_cats.keys())[0]
-                cat_sales[cat_name] = round(h_nett, 2)
-            elif len(valid_cats) > 1:
-                total_tax_valid = sum(valid_tax_cats.values())
-                if total_tax_valid > 0:
+            # Map C -> S (Sublet)
+            target_tax = {}
+            for k, v in valid_tax_cats.items():
+                mapped_k = "S" if k == "C" else k
+                target_tax[mapped_k] = target_tax.get(mapped_k, 0.0) + v
+                
+            target_cats = {}
+            for k, v in valid_cats.items():
+                mapped_k = "S" if k == "C" else k
+                target_cats[mapped_k] = target_cats.get(mapped_k, 0.0) + v
+            
+            if len(target_cats) == 1:
+                cat_name = list(target_cats.keys())[0]
+                cat_sales[cat_name] = doc_nett
+            elif len(target_cats) > 1:
+                tot_tax = sum(target_tax.values())
+                if tot_tax > 0:
                     allocated = 0.0
-                    cats_list = list(valid_tax_cats.keys())
-                    for c in cats_list[:-1]:
-                        c_amt = round(h_nett * (valid_tax_cats[c] / total_tax_valid), 2)
+                    c_list = list(target_tax.keys())
+                    for c in c_list[:-1]:
+                        c_amt = round(doc_nett * (target_tax[c] / tot_tax), 2)
                         cat_sales[c] = c_amt
                         allocated += c_amt
-                    cat_sales[cats_list[-1]] = round(h_nett - allocated, 2)
+                    cat_sales[c_list[-1]] = round(doc_nett - allocated, 2)
                 else:
-                    total_s_valid = sum(valid_cats.values())
+                    tot_s = sum(target_cats.values())
                     allocated = 0.0
-                    cats_list = list(valid_cats.keys())
-                    for c in cats_list[:-1]:
-                        c_amt = round(h_nett * (valid_cats[c] / total_s_valid), 2)
+                    c_list = list(target_cats.keys())
+                    for c in c_list[:-1]:
+                        c_amt = round(doc_nett * (target_cats[c] / tot_s), 2)
                         cat_sales[c] = c_amt
                         allocated += c_amt
-                    cat_sales[cats_list[-1]] = round(h_nett - allocated, 2)
+                    cat_sales[c_list[-1]] = round(doc_nett - allocated, 2)
+                    
+        # Fallback to Header parts_amount / labor_amount / other_amount
+        if not cat_sales:
+            p_amt = abs(float(h_row.get("parts_amount", 0.0)))
+            l_amt = abs(float(h_row.get("labor_amount", 0.0)))
+            s_amt = abs(float(h_row.get("other_amount", 0.0)))
+            tot_pl = p_amt + l_amt + s_amt
+            if tot_pl > 0:
+                sub_cats = []
+                if p_amt > 0: sub_cats.append(("P", p_amt))
+                if l_amt > 0: sub_cats.append(("L", l_amt))
+                if s_amt > 0: sub_cats.append(("S", s_amt))
+                if len(sub_cats) == 1:
+                    cat_sales[sub_cats[0][0]] = doc_nett
+                else:
+                    allocated = 0.0
+                    for c_name, c_val in sub_cats[:-1]:
+                        c_amt = round(doc_nett * (c_val / tot_pl), 2)
+                        cat_sales[c_name] = c_amt
+                        allocated += c_amt
+                    cat_sales[sub_cats[-1][0]] = round(doc_nett - allocated, 2)
             else:
-                cat_sales["P"] = round(h_nett, 2)
-        else:
-            cat_sales["P"] = round(h_nett, 2)
+                cat_sales["P"] = doc_nett
             
-        # Col H: DOCSEQ ยึดตาม Col F JNLDOCCODE (ARI -> SINVOICV, ARC -> SCREDITV)
-        doc_code = AUTOMATED_CONFIG.get("doc_code", "ARI")
-        if doc_code == "ARC":
-            doc_seq = "SCREDITV"
+        # ตรวจสอบความสมดุลของเอกสารแต่ละใบ (Doc Total == Items + Tax)
+        sum_items = round(sum(cat_sales.values()), 2)
+        if abs(doc_total - (sum_items + doc_tax)) > 0.05:
+            unbalanced_docs.append((inv_no, doc_total, sum_items, doc_tax))
+            
+        if is_cn:
+            count_cn += 1
+            cn_revenue += sum_items
+            cn_tax += doc_tax
+            cn_ar += doc_total
         else:
-            doc_seq = "SINVOICV"
+            count_inv += 1
+            inv_revenue += sum_items
+            inv_tax += doc_tax
+            inv_ar += doc_total
             
         # 1. Header Row
-        # Col A JNLDESC ใช้เลขที่ใบแจ้งหนี้ (inv_no)
+        # Col A JNLDESC ใช้เลขที่เอกสาร (inv_no)
         header_record = {
             "type": "HEADER",
             "A": inv_no,
@@ -241,8 +325,8 @@ def transform_to_autoline_data(df_header, df_detail):
             "F": doc_code,
             "G": AUTOMATED_CONFIG["currency"],
             "H": doc_seq,
-            "I": h_tax,
-            "J": h_total,
+            "I": doc_tax,
+            "J": doc_total,
             "K": doc_date,
             "L": None,
             "M": inv_no,
@@ -262,7 +346,7 @@ def transform_to_autoline_data(df_header, df_detail):
         rows_to_write.append(header_record)
         preview_records.append({
             "Invoice": inv_no,
-            "Row Type": "HEADER",
+            "Row Type": f"HEADER ({doc_code})",
             "Batch": batch_idx,
             "Line": "",
             "Doc Code": doc_code,
@@ -272,8 +356,8 @@ def transform_to_autoline_data(df_header, df_detail):
             "Department": "",
             "Debit": "",
             "Credit": "",
-            "Tax": h_tax,
-            "Total Value": h_total,
+            "Tax": doc_tax,
+            "Total Value": doc_total,
             "Narrative": misc_ref,
             "Branch": src_branch,
             "Subaccount": subaccount
@@ -282,25 +366,33 @@ def transform_to_autoline_data(df_header, df_detail):
         # 2. Blank Row
         rows_to_write.append({"type": "BLANK"})
         
-        # 3. Line 1: DEBIT Line (AR Control Account) -> UP FIRST
+        # 3. Line 1: AR Control Account
+        # Normal Invoice -> DEBIT (ลูกหนี้เพิ่ม)
+        # Credit Note (CN) -> CREDIT (ลูกหนี้ลด)
         ar_gl = AUTOMATED_CONFIG["ar_gl_code"]
         ar_dept = AUTOMATED_CONFIG["ar_department"]
         
-        debit_record = {
+        ar_debit = None if is_cn else doc_total
+        ar_credit = doc_total if is_cn else None
+        
+        ar_record = {
             "type": "ITEM",
             "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
             "G": AUTOMATED_CONFIG["currency"], "H": 1,
             "I": src_branch, "J": ar_dept, "K": int(ar_gl), "L": None,
-            "M": h_total, "N": None, "O": narrative, "P": None, "Q": None,
+            "M": ar_debit, "N": ar_credit, "O": narrative, "P": None, "Q": None,
             "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
             "X": None, "Y": None, "Z": None, "AA": None, "AB": None, "AC": None, "AD": None
         }
-        rows_to_write.append(debit_record)
-        total_debit_sum += h_total
-        
+        rows_to_write.append(ar_record)
+        if ar_debit is not None:
+            total_debit_sum += ar_debit
+        if ar_credit is not None:
+            total_credit_sum += ar_credit
+            
         preview_records.append({
             "Invoice": inv_no,
-            "Row Type": "DEBIT (AR)",
+            "Row Type": "CREDIT (AR)" if is_cn else "DEBIT (AR)",
             "Batch": batch_idx,
             "Line": 1,
             "Doc Code": "",
@@ -308,8 +400,8 @@ def transform_to_autoline_data(df_header, df_detail):
             "Date": doc_date.strftime("%Y-%m-%d"),
             "GL Code": ar_gl,
             "Department": ar_dept,
-            "Debit": h_total,
-            "Credit": "",
+            "Debit": ar_debit if ar_debit is not None else "",
+            "Credit": ar_credit if ar_credit is not None else "",
             "Tax": "",
             "Total Value": "",
             "Narrative": narrative,
@@ -317,7 +409,9 @@ def transform_to_autoline_data(df_header, df_detail):
             "Subaccount": subaccount
         })
         
-        # 4. Line 2+: CREDIT Lines (Revenue by Category)
+        # 4. Line 2+: Revenue Lines
+        # Normal Invoice -> CREDIT (รายได้เพิ่ม)
+        # Credit Note (CN) -> DEBIT (รายได้ลด)
         line_num = 2
         for cat, amount in cat_sales.items():
             if amount <= 0:
@@ -354,21 +448,27 @@ def transform_to_autoline_data(df_header, df_detail):
                 servprod = cfg["servprod"]             # S
                 servicefranc = cfg["servicefranc"]
             
-            credit_record = {
+            rev_debit = amount if is_cn else None
+            rev_credit = None if is_cn else amount
+            
+            rev_record = {
                 "type": "ITEM",
                 "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
                 "G": AUTOMATED_CONFIG["currency"], "H": line_num,
                 "I": src_branch, "J": dept_val, "K": gl_code_val, "L": None,
-                "M": None, "N": amount, "O": narrative, "P": None, "Q": tax_code_val,
+                "M": rev_debit, "N": rev_credit, "O": narrative, "P": None, "Q": tax_code_val,
                 "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
                 "X": aftstype_val, "Y": None, "Z": partfran, "AA": servprod, "AB": partprod, "AC": servicefranc, "AD": None
             }
-            rows_to_write.append(credit_record)
-            total_credit_sum += amount
+            rows_to_write.append(rev_record)
+            if rev_debit is not None:
+                total_debit_sum += rev_debit
+            if rev_credit is not None:
+                total_credit_sum += rev_credit
             
             preview_records.append({
                 "Invoice": inv_no,
-                "Row Type": f"CREDIT ({cat})",
+                "Row Type": f"DEBIT ({cat})" if is_cn else f"CREDIT ({cat})",
                 "Batch": batch_idx,
                 "Line": line_num,
                 "Doc Code": "",
@@ -376,8 +476,8 @@ def transform_to_autoline_data(df_header, df_detail):
                 "Date": doc_date.strftime("%Y-%m-%d"),
                 "GL Code": str(gl_code_val),
                 "Department": dept_val,
-                "Debit": "",
-                "Credit": amount,
+                "Debit": rev_debit if rev_debit is not None else "",
+                "Credit": rev_credit if rev_credit is not None else "",
                 "Tax": tax_code_val,
                 "Total Value": "",
                 "Narrative": narrative,
@@ -386,7 +486,6 @@ def transform_to_autoline_data(df_header, df_detail):
             })
             line_num += 1
             
-        total_tax_sum += h_tax
         batch_idx += 1
         # 5. เว้น 1 บรรทัดว่างหลังจบแต่ละบิล ก่อนขึ้นบิลถัดไป
         rows_to_write.append({"type": "BLANK"})
@@ -395,13 +494,28 @@ def transform_to_autoline_data(df_header, df_detail):
     if rows_to_write and rows_to_write[-1].get("type") == "BLANK":
         rows_to_write.pop()
         
+    net_revenue = round(inv_revenue - cn_revenue, 2)
+    net_tax = round(inv_tax - cn_tax, 2)
+    net_ar = round(inv_ar - cn_ar, 2)
+    
     summary_stats = {
-        "total_invoices": len(df_header),
-        "total_debit": total_debit_sum,
-        "total_credit": total_credit_sum,
-        "total_tax": total_tax_sum,
-        "is_balanced": abs(total_debit_sum - (total_credit_sum + total_tax_sum)) < 0.05,
-        "difference": round(total_debit_sum - (total_credit_sum + total_tax_sum), 2)
+        "total_documents": len(df_header),
+        "count_inv": count_inv,
+        "count_cn": count_cn,
+        "total_debit": round(total_debit_sum, 2),
+        "total_credit": round(total_credit_sum, 2),
+        "net_revenue": net_revenue,
+        "net_tax": net_tax,
+        "net_ar": net_ar,
+        "inv_revenue": round(inv_revenue, 2),
+        "inv_tax": round(inv_tax, 2),
+        "inv_ar": round(inv_ar, 2),
+        "cn_revenue": round(cn_revenue, 2),
+        "cn_tax": round(cn_tax, 2),
+        "cn_ar": round(cn_ar, 2),
+        "is_balanced": len(unbalanced_docs) == 0,
+        "unbalanced_count": len(unbalanced_docs),
+        "difference": round(abs((total_debit_sum - total_credit_sum) - (inv_tax - cn_tax)), 2)
     }
     
     preview_df = pd.DataFrame(preview_records)
@@ -498,22 +612,37 @@ if header_file and detail_file:
         # KPI Dashboard
         st.markdown("### 📊 สรุปตัวเลขและความสมดุลทางบัญชี (Balance Verification)")
         kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
-        kpi1.metric("จำนวนใบแจ้งหนี้", f"{summary_stats['total_invoices']:,} ใบ")
-        kpi2.metric("ยอดขายสุทธิ (Credit)", f"{summary_stats['total_credit']:,.2f} ฿")
-        kpi3.metric("ภาษี 7% (VAT)", f"{summary_stats['total_tax']:,.2f} ฿")
-        kpi4.metric("ยอดลูกหนี้รวม (Debit)", f"{summary_stats['total_debit']:,.2f} ฿")
+        
+        cn_label = f"Inv: {summary_stats['count_inv']:,} | CN: {summary_stats['count_cn']:,}" if summary_stats['count_cn'] > 0 else f"{summary_stats['count_inv']:,} ใบ"
+        kpi1.metric("จำนวนเอกสารทั้งหมด", f"{summary_stats['total_documents']:,} ฉบับ", delta=cn_label if summary_stats['count_cn'] > 0 else None)
+        
+        kpi2.metric(
+            "ยอดขายสุทธิ (Revenue)", 
+            f"{summary_stats['net_revenue']:,.2f} ฿",
+            delta=f"CN: -{summary_stats['cn_revenue']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+        )
+        kpi3.metric(
+            "ภาษี 7% (VAT)", 
+            f"{summary_stats['net_tax']:,.2f} ฿",
+            delta=f"CN: -{summary_stats['cn_tax']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+        )
+        kpi4.metric(
+            "ยอดลูกหนี้สุทธิ (AR)", 
+            f"{summary_stats['net_ar']:,.2f} ฿",
+            delta=f"CN: -{summary_stats['cn_ar']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+        )
         
         if summary_stats["is_balanced"]:
-            kpi5.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta="Dr = Cr + Tax")
+            kpi5.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta=f"ดุลครบทุกบิล ({summary_stats['total_documents']}/{summary_stats['total_documents']})")
         else:
-            kpi5.metric("สถานะดุลบัญชี", "ยอดไม่ดุล ⚠️", delta=f"Diff: {summary_stats['difference']}")
+            kpi5.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
 
         # Download Button
         st.markdown("---")
         col_dl1, col_dl2 = st.columns([2, 1])
         with col_dl1:
             st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline")
-            st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR/AP (DEBIT แถว 9, CREDIT แถว 10, เว้นแถว 8) พร้อมนำเข้าทันที")
+            st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR/AP (รองรับทั้งบิล ARI และใบลดหนี้ ARC พร้อมเว้นบรรทัดตามมาตรฐาน)")
         with col_dl2:
             excel_output = generate_output_excel(template_path, rows_to_write)
             now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -527,11 +656,19 @@ if header_file and detail_file:
             
         # Table Preview
         st.markdown("### 🔍 ตรวจสอบข้อมูลก่อนดาวน์โหลด (Data Preview)")
-        search_inv = st.text_input("ค้นหาเลขที่บิล", placeholder="พิมพ์เลขที่บิล เช่น 01S26080001")
+        search_kw = st.text_input("ค้นหาเอกสาร (เลขที่บิล, ใบลดหนี้, เลขที่อ้างอิง, ชื่อลูกค้า หรือ Doc Code)", placeholder="เช่น 01SC26050001, ARC, HA0027, SINVOICV")
         
         display_df = preview_df
-        if search_inv.strip():
-            display_df = preview_df[preview_df["Invoice"].astype(str).str.contains(search_inv.strip(), case=False, na=False)]
+        if search_kw.strip():
+            kw = search_kw.strip().lower()
+            mask = (
+                preview_df["Invoice"].astype(str).str.lower().str.contains(kw, na=False) |
+                preview_df["Narrative"].astype(str).str.lower().str.contains(kw, na=False) |
+                preview_df["Doc Code"].astype(str).str.lower().str.contains(kw, na=False) |
+                preview_df["Doc Seq"].astype(str).str.lower().str.contains(kw, na=False) |
+                preview_df["Row Type"].astype(str).str.lower().str.contains(kw, na=False)
+            )
+            display_df = preview_df[mask]
             
         st.dataframe(display_df, use_container_width=True, height=450)
         
