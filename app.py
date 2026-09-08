@@ -388,6 +388,12 @@ def transform_to_autoline_data(df_header, df_detail):
             
         total_tax_sum += h_tax
         batch_idx += 1
+        # 5. เว้น 1 บรรทัดว่างหลังจบแต่ละบิล ก่อนขึ้นบิลถัดไป
+        rows_to_write.append({"type": "BLANK"})
+        
+    # ลบแถวว่างส่วนเกินท้ายสุดหลังบิลสุดท้าย (ถ้ามี)
+    if rows_to_write and rows_to_write[-1].get("type") == "BLANK":
+        rows_to_write.pop()
         
     summary_stats = {
         "total_invoices": len(df_header),
