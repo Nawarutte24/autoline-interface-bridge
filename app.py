@@ -11,7 +11,6 @@ from io import BytesIO
 # 1. FIXED RULES & CONFIGURATION (DEALERPRO -> AUTOLINE)
 # =============================================================================
 AUTOMATED_CONFIG = {
-    "journal_desc": "After Sale",
     "doc_code": "ARI",
     "currency": "THB",
     "tax_group": "U",
@@ -20,30 +19,27 @@ AUTOMATED_CONFIG = {
     "ar_gl_code": "11311001",
     "ar_department": "0000",
     "parts": {
-        "doc_seq": "PINVOICE",
-        "gl_code": "41211004",
-        "department": "4002",  # งานอะไหล่: 4002
+        "gl_code": "41211001",  # Part -> 41211001
+        "department": "4002",   # งานอะไหล่: 4002
         "tax_code": "S",
         "aftstype": "R",
         "partfran": "J",
         "partprod": "A"
     },
     "labor": {
-        "doc_seq": "SINVOICE",
-        "gl_code": "41111001",
-        "department": "5002",  # งานบริการ: 5002
+        "gl_code": "42111001",  # Labor -> 42111001
+        "department": "5002",   # งานบริการ: 5002
         "tax_code": "S",
         "aftstype": "R",
-        "servprod": "A",
+        "servprod": "S",        # SERVPROD ปรับเป็น S
         "servicefranc": "JEEP"
     },
     "sublet": {
-        "doc_seq": "SINVOICE",
-        "gl_code": "41311001",
-        "department": "5002",  # งานบริการ: 5002
+        "gl_code": "42111001",  # Sublet -> 42111001
+        "department": "5002",   # งานบริการ: 5002
         "tax_code": "S",
         "aftstype": "R",
-        "servprod": "A",
+        "servprod": "S",        # SERVPROD ปรับเป็น S
         "servicefranc": "JEEP"
     }
 }
@@ -52,19 +48,19 @@ def resolve_branch_by_invoice(invoice_number):
     """
     BRANCH Mapping Rule:
     ดูจากตัวเลข 2 หลักแรกของ invoice_number:
-    - ถ้าเป็น 01, 03, 04, 05, 06, 07, 08, 09 -> mapping เป็น '01' ใน output
-    - ถ้าเป็น 02 -> mapping เป็น '02' ใน output
+    - ถ้าเป็น 01, 03, 04, 05, 06, 07, 08, 09 -> mapping เป็น '0001' ใน output
+    - ถ้าเป็น 02 -> mapping เป็น '0002' ใน output
     """
     if not invoice_number or pd.isna(invoice_number):
-        return "01"
+        return "0001"
     inv_str = str(invoice_number).strip()
     prefix2 = inv_str[:2]
     if prefix2 == "02":
-        return "02"
+        return "0002"
     elif prefix2 in ["01", "03", "04", "05", "06", "07", "08", "09"]:
-        return "01"
+        return "0001"
     else:
-        return "01"
+        return "0001"
 
 # =============================================================================
 # 2. TEMPLATE GENERATOR
@@ -109,13 +105,6 @@ def get_base_autoline_workbook(template_path=None):
 # =============================================================================
 # 3. PROCESSING & TRANSFORMATION ENGINE
 # =============================================================================
-def clean_advisor_first_name(advisor_name):
-    if not advisor_name or pd.isna(advisor_name):
-        return ""
-    s = str(advisor_name).strip()
-    parts = s.split()
-    return parts[0] if parts else s
-
 def load_and_validate_inputs(header_file, detail_file):
     df_header = pd.read_excel(header_file)
     df_detail = pd.read_excel(detail_file)
@@ -173,9 +162,20 @@ def transform_to_autoline_data(df_header, df_detail):
         else:
             doc_date = doc_date.to_pydatetime() if isinstance(doc_date, pd.Timestamp) else doc_date
             
-        advisor_full = h_row.get("service_advisor_name", "")
-        advisor_first = clean_advisor_first_name(advisor_full)
-        narrative = f"{advisor_first}_{inv_no}" if advisor_first else inv_no
+        cust_name = str(h_row.get("customer_name", "")).strip() if pd.notna(h_row.get("customer_name")) else ""
+        ro_no = str(h_row.get("repair_order_number", "")).strip() if pd.notna(h_row.get("repair_order_number")) else ""
+        
+        # Col N: (invoice_number)_(customer_name)_(repair_order_number)
+        if ro_no and cust_name:
+            misc_ref = f"{inv_no}_{cust_name}_{ro_no}"
+        elif cust_name:
+            misc_ref = f"{inv_no}_{cust_name}"
+        elif ro_no:
+            misc_ref = f"{inv_no}_{ro_no}"
+        else:
+            misc_ref = inv_no
+            
+        narrative = misc_ref
         
         h_nett = float(h_row.get("nett_price", 0.0))
         h_tax = float(h_row.get("sales_tax", 0.0))
@@ -188,9 +188,6 @@ def transform_to_autoline_data(df_header, df_detail):
         d_group = detail_by_inv.get(inv_no, pd.DataFrame())
         
         cat_sales = {}
-        has_parts = False
-        has_service = False
-        
         if not d_group.empty:
             cat_sums = d_group.groupby("category")["sales"].sum().to_dict()
             cat_tax_sums = d_group.groupby("category")["sales_tax"].sum().to_dict()
@@ -225,25 +222,23 @@ def transform_to_autoline_data(df_header, df_detail):
         else:
             cat_sales["P"] = round(h_nett, 2)
             
-        if "P" in cat_sales and cat_sales["P"] > 0:
-            has_parts = True
-        if any(cat_sales.get(c, 0) > 0 for c in ["L", "S"]):
-            has_service = True
-                
-        if has_parts and not has_service:
-            doc_seq = AUTOMATED_CONFIG["parts"]["doc_seq"]
+        # Col H: DOCSEQ ยึดตาม Col F JNLDOCCODE (ARI -> SINVOICV, ARC -> SCREDITV)
+        doc_code = AUTOMATED_CONFIG.get("doc_code", "ARI")
+        if doc_code == "ARC":
+            doc_seq = "SCREDITV"
         else:
-            doc_seq = AUTOMATED_CONFIG["labor"]["doc_seq"]
+            doc_seq = "SINVOICV"
             
         # 1. Header Row
+        # Col A JNLDESC ใช้เลขที่ใบแจ้งหนี้ (inv_no)
         header_record = {
             "type": "HEADER",
-            "A": AUTOMATED_CONFIG["journal_desc"],
+            "A": inv_no,
             "B": inv_no,
             "C": 1,
             "D": batch_idx,
             "E": None,
-            "F": AUTOMATED_CONFIG["doc_code"],
+            "F": doc_code,
             "G": AUTOMATED_CONFIG["currency"],
             "H": doc_seq,
             "I": h_tax,
@@ -251,7 +246,7 @@ def transform_to_autoline_data(df_header, df_detail):
             "K": doc_date,
             "L": None,
             "M": inv_no,
-            "N": narrative,
+            "N": misc_ref,
             "O": doc_date,
             "P": subaccount,
             "Q": None,
@@ -270,7 +265,7 @@ def transform_to_autoline_data(df_header, df_detail):
             "Row Type": "HEADER",
             "Batch": batch_idx,
             "Line": "",
-            "Doc Code": AUTOMATED_CONFIG["doc_code"],
+            "Doc Code": doc_code,
             "Doc Seq": doc_seq,
             "Date": doc_date.strftime("%Y-%m-%d"),
             "GL Code": "",
@@ -279,7 +274,7 @@ def transform_to_autoline_data(df_header, df_detail):
             "Credit": "",
             "Tax": h_tax,
             "Total Value": h_total,
-            "Narrative": narrative,
+            "Narrative": misc_ref,
             "Branch": src_branch,
             "Subaccount": subaccount
         })
@@ -330,8 +325,8 @@ def transform_to_autoline_data(df_header, df_detail):
                 
             if cat == "P":
                 cfg = AUTOMATED_CONFIG["parts"]
-                gl_code_val = int(cfg["gl_code"])
-                dept_val = str(cfg["department"])  # 4002 (งานอะไหล่)
+                gl_code_val = int(cfg["gl_code"])      # 41211001
+                dept_val = str(cfg["department"])      # 4002 (งานอะไหล่)
                 tax_code_val = cfg["tax_code"]
                 aftstype_val = cfg["aftstype"]
                 partfran = cfg["partfran"]
@@ -340,23 +335,23 @@ def transform_to_autoline_data(df_header, df_detail):
                 servicefranc = None
             elif cat == "L":
                 cfg = AUTOMATED_CONFIG["labor"]
-                gl_code_val = int(cfg["gl_code"])
-                dept_val = str(cfg["department"])  # 5002 (งานบริการ)
+                gl_code_val = int(cfg["gl_code"])      # 42111001
+                dept_val = str(cfg["department"])      # 5002 (งานบริการ)
                 tax_code_val = cfg["tax_code"]
                 aftstype_val = cfg["aftstype"]
                 partfran = None
                 partprod = None
-                servprod = cfg["servprod"]
+                servprod = cfg["servprod"]             # S
                 servicefranc = cfg["servicefranc"]
             else: # S (Sublet)
                 cfg = AUTOMATED_CONFIG["sublet"]
-                gl_code_val = int(cfg["gl_code"])
-                dept_val = str(cfg["department"])  # 5002 (งานบริการ)
+                gl_code_val = int(cfg["gl_code"])      # 42111001
+                dept_val = str(cfg["department"])      # 5002 (งานบริการ)
                 tax_code_val = cfg["tax_code"]
                 aftstype_val = cfg["aftstype"]
                 partfran = None
                 partprod = None
-                servprod = cfg["servprod"]
+                servprod = cfg["servprod"]             # S
                 servicefranc = cfg["servicefranc"]
             
             credit_record = {
