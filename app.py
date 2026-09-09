@@ -14,6 +14,8 @@ AUTOMATED_CONFIG = {
     "doc_code": "ARI",
     "currency": "THB",
     "tax_group": "U",
+    "tax_group_non_vat": "OS",
+    "tax_code_non_vat": "O",
     "terms": 30,
     "subaccount_default": "A0011",
     "ar_gl_code": "11311001",
@@ -207,6 +209,11 @@ def transform_to_autoline_data(df_header, df_detail):
         doc_tax = round(abs(h_tax), 2)
         doc_total = round(abs(h_total), 2)
         
+        # ตรวจสอบว่าเอกสารมีภาษีมูลค่าเพิ่มหรือไม่
+        # หากไม่มี VAT: TAXGROUP เป็น OS และ TAXCODE เป็น O
+        has_vat = (doc_tax > 0)
+        tax_group_val = AUTOMATED_CONFIG["tax_group"] if has_vat else AUTOMATED_CONFIG.get("tax_group_non_vat", "OS")
+        
         cust_name = str(h_row.get("customer_name", "")).strip() if pd.notna(h_row.get("customer_name")) else ""
         if cust_name.lower() == "nan":
             cust_name = ""
@@ -337,7 +344,7 @@ def transform_to_autoline_data(df_header, df_detail):
             "R": None,
             "S": None,
             "T": None,
-            "U": AUTOMATED_CONFIG["tax_group"],
+            "U": tax_group_val,
             "V": None,
             "W": terms_val,
             "X": src_branch,
@@ -421,7 +428,7 @@ def transform_to_autoline_data(df_header, df_detail):
                 cfg = AUTOMATED_CONFIG["parts"]
                 gl_code_val = int(cfg["gl_code"])      # 41211001
                 dept_val = str(cfg["department"])      # 4002 (งานอะไหล่)
-                tax_code_val = cfg["tax_code"]
+                tax_code_val = cfg["tax_code"] if has_vat else AUTOMATED_CONFIG.get("tax_code_non_vat", "O")
                 aftstype_val = cfg["aftstype"]
                 partfran = cfg["partfran"]
                 partprod = cfg["partprod"]
@@ -431,7 +438,7 @@ def transform_to_autoline_data(df_header, df_detail):
                 cfg = AUTOMATED_CONFIG["labor"]
                 gl_code_val = int(cfg["gl_code"])      # 42111001
                 dept_val = str(cfg["department"])      # 5002 (งานบริการ)
-                tax_code_val = cfg["tax_code"]
+                tax_code_val = cfg["tax_code"] if has_vat else AUTOMATED_CONFIG.get("tax_code_non_vat", "O")
                 aftstype_val = cfg["aftstype"]
                 partfran = None
                 partprod = None
@@ -441,7 +448,7 @@ def transform_to_autoline_data(df_header, df_detail):
                 cfg = AUTOMATED_CONFIG["sublet"]
                 gl_code_val = int(cfg["gl_code"])      # 42111001
                 dept_val = str(cfg["department"])      # 5002 (งานบริการ)
-                tax_code_val = cfg["tax_code"]
+                tax_code_val = cfg["tax_code"] if has_vat else AUTOMATED_CONFIG.get("tax_code_non_vat", "O")
                 aftstype_val = cfg["aftstype"]
                 partfran = None
                 partprod = None
