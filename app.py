@@ -46,23 +46,32 @@ AUTOMATED_CONFIG = {
     }
 }
 
-def resolve_branch_by_invoice(invoice_number):
+def resolve_branch(h_row=None, invoice_number=None):
     """
     BRANCH Mapping Rule:
-    ดูจากตัวเลข 2 หลักแรกของ invoice_number:
-    - ถ้าเป็น 01, 03, 04, 05, 06, 07, 08, 09 -> mapping เป็น '0001' ใน output
-    - ถ้าเป็น 02 -> mapping เป็น '0002' ใน output
+    - ถ้าเป็น dealer_prefix == 'KSN' หรือ branch_name == 'KasetNawamin' -> '0002'
+    - หรือถ้า invoice_number ขึ้นต้นด้วย '02' -> '0002'
+    - นอกเหนือจากนี้ -> '0001'
     """
-    if not invoice_number or pd.isna(invoice_number):
-        return "0001"
-    inv_str = str(invoice_number).strip()
-    prefix2 = inv_str[:2]
-    if prefix2 == "02":
+    if h_row is not None:
+        pfx = str(h_row.get("dealer_prefix", "")).strip().upper()
+        b_name = str(h_row.get("branch_name", "")).strip().lower()
+        if pfx == "KSN" or "kasetnawamin" in b_name:
+            return "0002"
+            
+    inv_str = ""
+    if invoice_number:
+        inv_str = str(invoice_number).strip()
+    elif h_row is not None:
+        inv_str = str(h_row.get("invoice_number", "")).strip()
+        
+    if inv_str.startswith("02"):
         return "0002"
-    elif prefix2 in ["01", "03", "04", "05", "06", "07", "08", "09"]:
-        return "0001"
-    else:
-        return "0001"
+        
+    return "0001"
+
+def resolve_branch_by_invoice(invoice_number):
+    return resolve_branch(invoice_number=invoice_number)
 
 # =============================================================================
 # 2. TEMPLATE GENERATOR
@@ -233,7 +242,7 @@ def transform_to_autoline_data(df_header, df_detail):
         
         subaccount = AUTOMATED_CONFIG["subaccount_default"]
         terms_val = AUTOMATED_CONFIG["terms"]
-        src_branch = resolve_branch_by_invoice(inv_no)
+        src_branch = resolve_branch(h_row=h_row, invoice_number=inv_no)
         
         # Detail lookup: สำหรับ CN ให้อ้างอิง Preview_Document ใน Detail ก่อน
         lookup_inv = prev_doc if (is_cn and prev_doc and prev_doc in detail_by_inv) else inv_no
