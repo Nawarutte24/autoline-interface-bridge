@@ -117,9 +117,50 @@ def get_base_autoline_workbook(template_path=None):
 # =============================================================================
 # 3. PROCESSING & TRANSFORMATION ENGINE
 # =============================================================================
+def read_input_file(file_obj):
+    """
+    Smart File Reader:
+    - รองรับทั้งไฟล์ Excel (.xlsx, .xls) และ CSV (.csv)
+    - ตรวจจับและรองรับการเข้ารหัสภาษาไทยอัตโนมัติ (utf-8-sig, utf-8, cp874, tis-620)
+    - กำหนด dtype=str สำหรับ CSV เพื่อรักษาเลข 0 ด้านหน้า (เช่น รหัสสาขา '009', '02')
+    """
+    file_name = getattr(file_obj, "name", "")
+    if isinstance(file_obj, str):
+        file_name = file_obj
+        
+    is_csv = file_name.lower().endswith(".csv")
+    
+    if is_csv:
+        encodings = ["utf-8-sig", "utf-8", "cp874", "tis-620"]
+        for enc in encodings:
+            try:
+                if hasattr(file_obj, "seek"):
+                    file_obj.seek(0)
+                return pd.read_csv(file_obj, encoding=enc, dtype=str)
+            except Exception:
+                continue
+        if hasattr(file_obj, "seek"):
+            file_obj.seek(0)
+        return pd.read_csv(file_obj, dtype=str)
+    else:
+        try:
+            if hasattr(file_obj, "seek"):
+                file_obj.seek(0)
+            return pd.read_excel(file_obj)
+        except Exception:
+            # Fallback กรณีไฟล์ CSV แต่เปลี่ยนนามสกุล หรือไม่มีนามสกุล
+            for enc in ["utf-8-sig", "utf-8", "cp874", "tis-620"]:
+                try:
+                    if hasattr(file_obj, "seek"):
+                        file_obj.seek(0)
+                    return pd.read_csv(file_obj, encoding=enc, dtype=str)
+                except Exception:
+                    continue
+            raise
+
 def load_and_validate_inputs(header_file, detail_file):
-    df_header = pd.read_excel(header_file)
-    df_detail = pd.read_excel(detail_file)
+    df_header = read_input_file(header_file)
+    df_detail = read_input_file(detail_file)
         
     df_header.columns = [str(c).strip() for c in df_header.columns]
     df_detail.columns = [str(c).strip() for c in df_detail.columns]
@@ -611,13 +652,13 @@ st.markdown('<div class="sub-header">ระบบแปลงข้อมูล�
 col_up1, col_up2 = st.columns(2)
 with col_up1:
     st.subheader("1. อัปโหลดไฟล์ HEADER")
-    st.caption("ไฟล์ที่มีเลขที่บิล, วันที่, ข้อมูลลูกค้า, และยอดรวม")
-    header_file = st.file_uploader("เลือกไฟล์ HEADER (.xlsx)", type=["xlsx", "xls"], key="header_upload")
+    st.caption("ไฟล์ที่มีเลขที่บิล, วันที่, ข้อมูลลูกค้า, และยอดรวม (.xlsx หรือ .csv)")
+    header_file = st.file_uploader("เลือกไฟล์ HEADER (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="header_upload")
     
 with col_up2:
     st.subheader("2. อัปโหลดไฟล์ DETAIL")
-    st.caption("ไฟล์ที่มีรายการแยกตามหมวด อะไหล่ P, ค่าแรง L, บริการ S")
-    detail_file = st.file_uploader("เลือกไฟล์ DETAIL (.xlsx)", type=["xlsx", "xls"], key="detail_upload")
+    st.caption("ไฟล์ที่มีรายการแยกตามหมวด อะไหล่ P, ค่าแรง L, บริการ S (.xlsx หรือ .csv)")
+    detail_file = st.file_uploader("เลือกไฟล์ DETAIL (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="detail_upload")
 
 if header_file and detail_file:
     try:
