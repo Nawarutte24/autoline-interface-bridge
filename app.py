@@ -18,6 +18,7 @@ AUTOMATED_CONFIG = {
     "tax_code_non_vat": "O",
     "terms": 30,
     "subaccount_default": "A0011",
+    "credit_reason_code": "00000004",  # Incorrect (Credit Reason for Autoline ARC)
     "ar_gl_code": "11311001",
     "ar_department": "0000",
     "parts": {
@@ -222,6 +223,7 @@ def transform_to_autoline_data(df_header, df_detail):
         # หากไม่มี VAT: TAXGROUP เป็น OS และ TAXCODE เป็น O
         has_vat = (doc_tax > 0)
         tax_group_val = AUTOMATED_CONFIG["tax_group"] if has_vat else AUTOMATED_CONFIG.get("tax_group_non_vat", "OS")
+        crcode_val = AUTOMATED_CONFIG.get("credit_reason_code", "00000004") if is_cn else None
         
         cust_name = str(h_row.get("customer_name", "")).strip() if pd.notna(h_row.get("customer_name")) else ""
         if cust_name.lower() == "nan":
@@ -357,7 +359,7 @@ def transform_to_autoline_data(df_header, df_detail):
             "V": None,
             "W": terms_val,
             "X": src_branch,
-            "Y": None
+            "Y": crcode_val
         }
         rows_to_write.append(header_record)
         preview_records.append({
@@ -563,6 +565,8 @@ def generate_output_excel(template_path, rows_to_write):
                     cell.number_format = "yyyy-mm-dd"
                 elif isinstance(val, (int, float)) and col_letter in ["I", "J", "M", "N"]:
                     cell.number_format = "#,##0.00"
+                elif col_letter == "Y" and val is not None:
+                    cell.number_format = "@"
                     
         current_row += 1
         
