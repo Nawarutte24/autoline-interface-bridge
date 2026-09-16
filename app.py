@@ -186,6 +186,11 @@ def load_and_validate_inputs(header_file, detail_file):
     df_header = df_header[df_header["invoice_number"] != ""].copy()
     df_detail = df_detail[df_detail["invoice_number"] != ""].copy()
     
+    # ไม่นำเข้าบิลที่ขึ้นต้นด้วย CA หรือ HA
+    excluded_prefixes = ("CA", "HA")
+    df_header = df_header[~df_header["invoice_number"].str.upper().str.startswith(excluded_prefixes)].copy()
+    df_detail = df_detail[~df_detail["invoice_number"].str.upper().str.startswith(excluded_prefixes)].copy()
+    
     if "Preview_Document" in df_header.columns:
         df_header["Preview_Document"] = df_header["Preview_Document"].fillna("").astype(str).str.strip()
         df_header.loc[df_header["Preview_Document"].str.lower() == "nan", "Preview_Document"] = ""
@@ -245,7 +250,7 @@ def transform_to_autoline_data(df_header, df_detail):
         
     for _, h_row in df_header.iterrows():
         inv_no = str(h_row["invoice_number"]).strip()
-        if not inv_no:
+        if not inv_no or inv_no.upper().startswith(("CA", "HA")):
             continue
             
         doc_date = h_row.get("parsed_date")
