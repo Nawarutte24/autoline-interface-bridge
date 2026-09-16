@@ -22,8 +22,15 @@ AUTOMATED_CONFIG = {
     "ar_gl_code": "11311001",
     "ar_department": "0000",
     "parts_cogs_gl_code": "51211006",  # บัญชีต้นทุนขายอะไหล่ (COGS)
+    "parts_cogs_tax_code": "O",        # Non-VAT (0%)
+    "parts_cogs_aftstype": "R",
+    "parts_cogs_partfran": "J",
+    "parts_cogs_partprod": "A",
     "inventory_gl_code": "11511112",   # บัญชีสต็อกอะไหล่ (Inventory)
     "inventory_department": "0000",    # แผนกสต็อก (Control Account)
+    "inventory_tax_code": "O",         # Non-VAT (0%) ป้องกันไม่ให้คิดภาษีซ้ำซ้อน
+    "inventory_manufact": "JEEP",      # Fixed ค่าคงที่
+    "inventory_model": "JEEP-G6",      # Fixed ค่าคงที่
     "parts": {
         "gl_code": "41211001",  # Part -> 41211001
         "department": "4002",   # งานอะไหล่: 4002
@@ -562,6 +569,10 @@ def transform_to_autoline_data(df_header, df_detail):
             total_parts_cogs += parts_cost
             cogs_gl = int(AUTOMATED_CONFIG.get("parts_cogs_gl_code", "51211006"))
             cogs_dept = AUTOMATED_CONFIG["parts"]["department"]
+            cogs_tax = AUTOMATED_CONFIG.get("parts_cogs_tax_code", "O")
+            cogs_afts = AUTOMATED_CONFIG.get("parts_cogs_aftstype", "R")
+            cogs_fran = AUTOMATED_CONFIG.get("parts_cogs_partfran", "J")
+            cogs_prod = AUTOMATED_CONFIG.get("parts_cogs_partprod", "A")
             
             # Normal Invoice (ARI): DEBIT COGS, CREDIT Stock
             # Credit Note (ARC): CREDIT COGS, DEBIT Stock
@@ -573,9 +584,9 @@ def transform_to_autoline_data(df_header, df_detail):
                 "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
                 "G": AUTOMATED_CONFIG["currency"], "H": line_num,
                 "I": src_branch, "J": cogs_dept, "K": cogs_gl, "L": None,
-                "M": cogs_debit, "N": cogs_credit, "O": narrative, "P": None, "Q": None,
+                "M": cogs_debit, "N": cogs_credit, "O": narrative, "P": None, "Q": cogs_tax,
                 "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
-                "X": None, "Y": None, "Z": None, "AA": None, "AB": None, "AC": None, "AD": None
+                "X": cogs_afts, "Y": None, "Z": cogs_fran, "AA": None, "AB": cogs_prod, "AC": None, "AD": None
             }
             rows_to_write.append(cogs_record)
             if cogs_debit is not None:
@@ -595,7 +606,7 @@ def transform_to_autoline_data(df_header, df_detail):
                 "Department": cogs_dept,
                 "Debit": cogs_debit if cogs_debit is not None else "",
                 "Credit": cogs_credit if cogs_credit is not None else "",
-                "Tax": "",
+                "Tax": cogs_tax,
                 "Total Value": "",
                 "Narrative": narrative,
                 "Branch": src_branch,
@@ -606,7 +617,9 @@ def transform_to_autoline_data(df_header, df_detail):
             # Line Stock / Inventory
             inv_gl = int(AUTOMATED_CONFIG.get("inventory_gl_code", "11511112"))
             inv_dept = AUTOMATED_CONFIG.get("inventory_department", "0000")
-            stock_tax_code = AUTOMATED_CONFIG["parts"]["tax_code"] if has_vat else AUTOMATED_CONFIG.get("tax_code_non_vat", "O")
+            stock_tax_code = AUTOMATED_CONFIG.get("inventory_tax_code", "O")
+            stock_mfg = AUTOMATED_CONFIG.get("inventory_manufact", "JEEP")
+            stock_model = AUTOMATED_CONFIG.get("inventory_model", "JEEP-G6")
             
             stock_debit = parts_cost if is_cn else None
             stock_credit = None if is_cn else parts_cost
@@ -617,8 +630,8 @@ def transform_to_autoline_data(df_header, df_detail):
                 "G": AUTOMATED_CONFIG["currency"], "H": line_num,
                 "I": src_branch, "J": inv_dept, "K": inv_gl, "L": None,
                 "M": stock_debit, "N": stock_credit, "O": narrative, "P": None, "Q": stock_tax_code,
-                "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
-                "X": "R", "Y": None, "Z": "J", "AA": None, "AB": "A", "AC": None, "AD": None
+                "R": None, "S": None, "T": None, "U": stock_mfg, "V": stock_model, "W": None,
+                "X": None, "Y": None, "Z": None, "AA": None, "AB": None, "AC": None, "AD": None
             }
             rows_to_write.append(stock_record)
             if stock_debit is not None:
