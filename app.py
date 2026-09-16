@@ -17,7 +17,7 @@ AUTOMATED_CONFIG = {
     "tax_group_non_vat": "OS",
     "tax_code_non_vat": "O",
     "terms": 30,
-    "subaccount_default": "A0011",
+    "subaccount_default": "X0004",
     "credit_reason_code": "00000004",  # Incorrect (Credit Reason for Autoline ARC)
     "ar_gl_code": "11311001",
     "ar_department": "0000",
