@@ -21,6 +21,9 @@ AUTOMATED_CONFIG = {
     "credit_reason_code": "00000004",  # Incorrect (Credit Reason for Autoline ARC)
     "ar_gl_code": "11311001",
     "ar_department": "0000",
+    "parts_cogs_gl_code": "51211006",  # บัญชีต้นทุนขายอะไหล่ (COGS)
+    "inventory_gl_code": "11511112",   # บัญชีสต็อกอะไหล่ (Inventory)
+    "inventory_department": "0000",    # แผนกสต็อก (Control Account)
     "parts": {
         "gl_code": "41211001",  # Part -> 41211001
         "department": "4002",   # งานอะไหล่: 4002
@@ -194,11 +197,11 @@ def load_and_validate_inputs(header_file, detail_file):
             
     df_detail["category"] = df_detail["category"].fillna("").astype(str).str.strip().str.upper()
     
-    for col in ["sales", "sales_tax", "nett_price", "discount_amount"]:
+    for col in ["sales", "sales_tax", "nett_price", "discount_amount", "cost_of_sales"]:
         if col in df_detail.columns:
             df_detail[col] = pd.to_numeric(df_detail[col], errors="coerce").fillna(0.0)
             
-    for col in ["sales", "sales_tax", "total", "labor_amount", "parts_amount", "other_amount", "nett_price"]:
+    for col in ["sales", "sales_tax", "total", "labor_amount", "parts_amount", "other_amount", "nett_price", "cost_of_sales"]:
         if col in df_header.columns:
             df_header[col] = pd.to_numeric(df_header[col], errors="coerce").fillna(0.0)
             
@@ -224,6 +227,8 @@ def transform_to_autoline_data(df_header, df_detail):
     cn_revenue = 0.0
     cn_tax = 0.0
     cn_ar = 0.0
+    
+    total_parts_cogs = 0.0
     
     count_inv = 0
     count_cn = 0
@@ -545,8 +550,104 @@ def transform_to_autoline_data(df_header, df_detail):
             })
             line_num += 1
             
+        # 5. Line COGS & Inventory (สร้างคู่ขนานเมื่อมีการขายอะไหล่และมีต้นทุน parts_cost > 0)
+        parts_cost = 0.0
+        if not d_group.empty and "cost_of_sales" in d_group.columns:
+            parts_cost = float(d_group[d_group["category"] == "P"]["cost_of_sales"].sum())
+        if parts_cost == 0.0 and cat_sales.get("P", 0.0) > 0:
+            parts_cost = float(h_row.get("cost_of_sales", 0.0))
+        parts_cost = round(abs(parts_cost), 2)
+        
+        if parts_cost > 0:
+            total_parts_cogs += parts_cost
+            cogs_gl = int(AUTOMATED_CONFIG.get("parts_cogs_gl_code", "51211006"))
+            cogs_dept = AUTOMATED_CONFIG["parts"]["department"]
+            
+            # Normal Invoice (ARI): DEBIT COGS, CREDIT Stock
+            # Credit Note (ARC): CREDIT COGS, DEBIT Stock
+            cogs_debit = parts_cost if not is_cn else None
+            cogs_credit = None if not is_cn else parts_cost
+            
+            cogs_record = {
+                "type": "ITEM",
+                "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
+                "G": AUTOMATED_CONFIG["currency"], "H": line_num,
+                "I": src_branch, "J": cogs_dept, "K": cogs_gl, "L": None,
+                "M": cogs_debit, "N": cogs_credit, "O": narrative, "P": None, "Q": None,
+                "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
+                "X": None, "Y": None, "Z": None, "AA": None, "AB": None, "AC": None, "AD": None
+            }
+            rows_to_write.append(cogs_record)
+            if cogs_debit is not None:
+                total_debit_sum += cogs_debit
+            if cogs_credit is not None:
+                total_credit_sum += cogs_credit
+                
+            preview_records.append({
+                "Invoice": inv_no,
+                "Row Type": "CREDIT (COGS)" if is_cn else "DEBIT (COGS)",
+                "Batch": batch_idx,
+                "Line": line_num,
+                "Doc Code": "",
+                "Doc Seq": "",
+                "Date": doc_date.strftime("%Y-%m-%d"),
+                "GL Code": str(cogs_gl),
+                "Department": cogs_dept,
+                "Debit": cogs_debit if cogs_debit is not None else "",
+                "Credit": cogs_credit if cogs_credit is not None else "",
+                "Tax": "",
+                "Total Value": "",
+                "Narrative": narrative,
+                "Branch": src_branch,
+                "Subaccount": ""
+            })
+            line_num += 1
+            
+            # Line Stock / Inventory
+            inv_gl = int(AUTOMATED_CONFIG.get("inventory_gl_code", "11511112"))
+            inv_dept = AUTOMATED_CONFIG.get("inventory_department", "0000")
+            stock_tax_code = AUTOMATED_CONFIG["parts"]["tax_code"] if has_vat else AUTOMATED_CONFIG.get("tax_code_non_vat", "O")
+            
+            stock_debit = parts_cost if is_cn else None
+            stock_credit = None if is_cn else parts_cost
+            
+            stock_record = {
+                "type": "ITEM",
+                "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
+                "G": AUTOMATED_CONFIG["currency"], "H": line_num,
+                "I": src_branch, "J": inv_dept, "K": inv_gl, "L": None,
+                "M": stock_debit, "N": stock_credit, "O": narrative, "P": None, "Q": stock_tax_code,
+                "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
+                "X": "R", "Y": None, "Z": "J", "AA": None, "AB": "A", "AC": None, "AD": None
+            }
+            rows_to_write.append(stock_record)
+            if stock_debit is not None:
+                total_debit_sum += stock_debit
+            if stock_credit is not None:
+                total_credit_sum += stock_credit
+                
+            preview_records.append({
+                "Invoice": inv_no,
+                "Row Type": "DEBIT (Stock)" if is_cn else "CREDIT (Stock)",
+                "Batch": batch_idx,
+                "Line": line_num,
+                "Doc Code": "",
+                "Doc Seq": "",
+                "Date": doc_date.strftime("%Y-%m-%d"),
+                "GL Code": str(inv_gl),
+                "Department": inv_dept,
+                "Debit": stock_debit if stock_debit is not None else "",
+                "Credit": stock_credit if stock_credit is not None else "",
+                "Tax": stock_tax_code,
+                "Total Value": "",
+                "Narrative": narrative,
+                "Branch": src_branch,
+                "Subaccount": ""
+            })
+            line_num += 1
+            
         batch_idx += 1
-        # 5. เว้น 1 บรรทัดว่างหลังจบแต่ละบิล ก่อนขึ้นบิลถัดไป
+        # 6. เว้น 1 บรรทัดว่างหลังจบแต่ละบิล ก่อนขึ้นบิลถัดไป
         rows_to_write.append({"type": "BLANK"})
         
     # ลบแถวว่างส่วนเกินท้ายสุดหลังบิลสุดท้าย (ถ้ามี)
@@ -563,6 +664,7 @@ def transform_to_autoline_data(df_header, df_detail):
         "count_cn": count_cn,
         "total_debit": round(total_debit_sum, 2),
         "total_credit": round(total_credit_sum, 2),
+        "total_parts_cogs": round(total_parts_cogs, 2),
         "net_revenue": net_revenue,
         "net_tax": net_tax,
         "net_ar": net_ar,
@@ -672,7 +774,7 @@ if header_file and detail_file:
         
         # KPI Dashboard
         st.markdown("### 📊 สรุปตัวเลขและความสมดุลทางบัญชี (Balance Verification)")
-        kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+        kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
         
         cn_label = f"Inv: {summary_stats['count_inv']:,} | CN: {summary_stats['count_cn']:,}" if summary_stats['count_cn'] > 0 else f"{summary_stats['count_inv']:,} ใบ"
         kpi1.metric("จำนวนเอกสารทั้งหมด", f"{summary_stats['total_documents']:,} ฉบับ", delta=cn_label if summary_stats['count_cn'] > 0 else None)
@@ -692,11 +794,16 @@ if header_file and detail_file:
             f"{summary_stats['net_ar']:,.2f} ฿",
             delta=f"CN: -{summary_stats['cn_ar']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
         )
+        kpi5.metric(
+            "ต้นทุนอะไหล่ (COGS)",
+            f"{summary_stats.get('total_parts_cogs', 0.0):,.2f} ฿",
+            delta="Dr 51211006 / Cr 11511112"
+        )
         
         if summary_stats["is_balanced"]:
-            kpi5.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta=f"ดุลครบทุกบิล ({summary_stats['total_documents']}/{summary_stats['total_documents']})")
+            kpi6.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta=f"ดุลครบทุกบิล ({summary_stats['total_documents']}/{summary_stats['total_documents']})")
         else:
-            kpi5.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
+            kpi6.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
 
         # Download Button
         st.markdown("---")
