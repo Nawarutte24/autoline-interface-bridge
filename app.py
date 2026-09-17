@@ -955,21 +955,38 @@ def load_gl_descriptions(file_or_path):
             "row": r
         })
         
-    return gl_map
+def clean_customer_name(name):
+    if not name:
+        return ""
+    import re
+    s = str(name).strip()
+    s = re.sub(r'\s*\((สำนักงานใหญ่|สนญ\.|สาขาที่\s*\d+|สาขา\s*\d+|สนง\.\s*ใหญ่)\s*\)', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s+(สำนักงานใหญ่|สนญ\.|สาขาที่\s*\d+)$', '', s, flags=re.IGNORECASE)
+    return s.strip()
 
 def load_stock_numbers(file_or_path):
     wb = openpyxl.load_workbook(file_or_path, data_only=True)
     ws = wb.active
     stock_by_inv = {}
+    fin_coy_by_inv = {}
+    vin_by_inv = {}
     for r in range(1, ws.max_row + 1):
         c1 = ws.cell(row=r, column=1).value
+        c2 = ws.cell(row=r, column=2).value
+        c3 = ws.cell(row=r, column=3).value
         c5 = ws.cell(row=r, column=5).value
         if c1 and str(c1).strip().startswith('N0') and c5:
             stk_no = str(c1).strip()
             inv_no = str(c5).strip()
+            c3_str = str(c3).strip() if c3 is not None else ""
+            c2_str = str(c2).strip() if c2 is not None else ""
             if inv_no:
                 stock_by_inv[inv_no] = stk_no
-    return stock_by_inv
+                if c3_str:
+                    fin_coy_by_inv[inv_no] = c3_str
+                if c2_str:
+                    vin_by_inv[inv_no] = c2_str
+    return stock_by_inv, fin_coy_by_inv, vin_by_inv
 
 def load_vehicle_costs(file_or_path):
     wb = openpyxl.load_workbook(file_or_path, data_only=True)
@@ -987,7 +1004,98 @@ def load_vehicle_costs(file_or_path):
                     pass
     return cost_by_stock
 
-def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None, user_config=None):
+def load_finance_codes(file_or_path):
+    wb = openpyxl.load_workbook(file_or_path, data_only=True)
+    ws = wb.active
+    fin_by_code = {}
+    fin_list = []
+    for r in range(2, ws.max_row + 1):
+        d_pro = str(ws.cell(r, 1).value or '').strip()
+        autoline = str(ws.cell(r, 2).value or '').strip()
+        c_name = str(ws.cell(r, 3).value or '').strip()
+        if autoline:
+            fin_list.append((d_pro, autoline, c_name))
+            if d_pro:
+                fin_by_code[d_pro] = autoline
+    return {"by_code": fin_by_code, "list": fin_list}
+
+def resolve_finance_subaccount(inv_no, cust_name, fin_coy_code=None, fin_data=None, default_code="X0003"):
+    if not fin_data:
+        return default_code
+    by_code = fin_data.get("by_code", {})
+    f_list = fin_data.get("list", [])
+    
+    # 1. Match from fin_coy (Dealer pro code from Stock file)
+    if fin_coy_code and fin_coy_code in by_code:
+        return by_code[fin_coy_code]
+        
+    c = str(cust_name or '').strip()
+    if not c:
+        return default_code
+        
+    # 2. Substring matching with company names
+    for d_pro, autoline, f_name in f_list:
+        clean_f = f_name.replace('บริษัท', '').replace('จำกัด', '').replace('(มหาชน)', '').replace('(สำนักงานใหญ่)', '').replace('ธนาคาร', '').strip()
+        if clean_f and clean_f in c:
+            return autoline
+            
+def load_vehicle_gl_cogs(file_or_path):
+    import re
+    wb = openpyxl.load_workbook(file_or_path, data_only=True)
+    ws = wb.active
+    
+    # First pass: map VIN to Stock number from descriptions across the sheet
+    vin_to_stock = {}
+    for r in range(2, ws.max_row + 1):
+        for c in (10, 11, 12):
+            val = str(ws.cell(r, c).value or '').strip()
+            m = re.search(r'(N0\d+)[#\-_ ]*([A-Z0-9]{6,17})', val)
+            if m:
+                stk, vin = m.group(1), m.group(2)
+                vin_to_stock[vin] = stk
+                if len(vin) >= 6:
+                    vin_to_stock[vin[-6:]] = stk
+                    vin_to_stock[vin[-8:]] = stk
+                    
+    cogs_map = {}
+    for r in range(2, ws.max_row + 1):
+        acc = str(ws.cell(r, 3).value or '').strip()
+        tt = str(ws.cell(r, 6).value or '').strip()
+        # Account 511001 with TT == '2' contains actual vehicle sales cost (both ARI and ARC)
+        if (acc == '511001' or acc.startswith('511')) and tt == '2':
+            doc = str(ws.cell(r, 10).value or '').strip()
+            dr = ws.cell(r, 8).value
+            cr = ws.cell(r, 9).value
+            desc = str(ws.cell(r, 12).value or '').strip()
+            sub = str(ws.cell(r, 11).value or '').strip()
+            
+            amt = dr if dr is not None and dr != '' else cr
+            if doc and amt is not None and amt != '':
+                try:
+                    f_amt = abs(float(amt))
+                except (ValueError, TypeError):
+                    continue
+                if f_amt > 0:
+                    m_stk = re.search(r'(N0\d+)', desc)
+                    stk_no = m_stk.group(1) if m_stk else ""
+                    m_vin = re.search(r'([A-Z0-9]{8,17})', desc)
+                    vin_no = m_vin.group(1) if m_vin else ""
+                    if not stk_no and vin_no:
+                        stk_no = vin_to_stock.get(vin_no, vin_to_stock.get(vin_no[-6:], vin_to_stock.get(vin_no[-8:], '')))
+                    ident = stk_no or vin_no or ""
+                    
+                    if doc not in cogs_map or cogs_map[doc]["cost"] == 0:
+                        cogs_map[doc] = {
+                            "cost": f_amt,
+                            "stock_no": stk_no,
+                            "vin": vin_no,
+                            "identifier": ident,
+                            "desc": desc,
+                            "model_code": sub
+                        }
+    return cogs_map
+
+def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None, fin_coy_dict=None, fin_data=None, vehicle_gl_dict=None, vin_dict=None, user_config=None):
     import copy
     cfg = copy.deepcopy(DEFAULT_SALES_CONFIG)
     if user_config:
@@ -999,10 +1107,16 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             else:
                 cfg[k] = v
                 
+    if gl_dict is None:
+        gl_dict = {}
     if stock_dict is None:
         stock_dict = {}
     if cost_dict is None:
         cost_dict = {}
+    if fin_coy_dict is None:
+        fin_coy_dict = {}
+    if vin_dict is None:
+        vin_dict = {}
         
     rows_to_write = []
     preview_rows = []
@@ -1023,6 +1137,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         doc_date = row["doc_date"]
         doc_date_str = row["doc_date_str"]
         cust_name = row["customer_name"]
+        clean_cust = clean_customer_name(cust_name)
         
         net_val = float(row["net_amount"])
         vat_val = float(row["vat_amount"])
@@ -1034,10 +1149,8 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         abs_net = abs(net_val)
         
         branch = resolve_sales_branch(inv_no)
-        narrative = f"{inv_no}_{cust_name}" if cust_name else inv_no
-        if len(narrative) > 75:
-            narrative = narrative[:75]
-            
+        is_wg = inv_no.startswith(('01WG', '02WG'))
+        
         doc_code = "ARC" if is_cn else "ARI"
         doc_seq = "SCREDITV" if is_cn else "SINVOICV"
         
@@ -1045,17 +1158,66 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         if not gl_lines and (inv_no.startswith(('01D', '02D', '01DC', '02DC'))):
             unmatched_gl_count += 1
             
-        is_wg = inv_no.startswith(('01WG', '02WG'))
+        # Fixed Defaults as required by Autoline constraints
+        cogs_mfg = str(cfg.get("vehicle_cogs_manufact", "JEEP"))
+        cogs_model = str(cfg.get("vehicle_cogs_model", "JEEP-G6"))
+        cogs_sale = str(cfg.get("vehicle_cogs_saletype", "TRADE"))
+        inv_mfg = str(cfg.get("vehicle_inv_manufact", "JEEP"))
+        inv_model = str(cfg.get("vehicle_inv_model", "JEEP-G6"))
+        
+        # Resolve Vehicle Data (Stock No, VIN, and Cost)
+        car_cost = 0.0
+        stk_no = ""
+        vin_no = ""
+        
+        if is_wg:
+            # 1. Primary from Vehicle GL (511001)
+            if vehicle_gl_dict and inv_no in vehicle_gl_dict:
+                vgl_entry = vehicle_gl_dict[inv_no]
+                car_cost = vgl_entry.get("cost", 0.0)
+                stk_no = vgl_entry.get("stock_no") or ""
+                vin_no = vgl_entry.get("vin") or ""
+                if not stk_no and vgl_entry.get("identifier", "").startswith("N0"):
+                    stk_no = vgl_entry.get("identifier")
+                    
+            # 2. Supplementary / Fallback from Stock and VIN dictionaries
+            if not stk_no and stock_dict:
+                stk_no = stock_dict.get(inv_no, "")
+                
+            if not vin_no and vin_dict:
+                vin_no = vin_dict.get(inv_no, "")
+                
+            if car_cost <= 0 and stk_no and cost_dict:
+                car_cost = cost_dict.get(stk_no, 0.0)
+                
+            # Da's Template: {inv_no}_{Customer_Name}_{VIN}
+            if vin_no:
+                narrative = f"{inv_no}_{clean_cust}_{vin_no}" if clean_cust else f"{inv_no}_{vin_no}"
+            else:
+                narrative = f"{inv_no}_{clean_cust}" if clean_cust else inv_no
+        else:
+            narrative = f"{inv_no}_{cust_name}" if cust_name else inv_no
+            
+        if len(narrative) > 75:
+            narrative = narrative[:75]
+            
         itemized_lines = []
         
         if is_wg:
-            if is_finance_customer(cust_name):
+            fin_coy = fin_coy_dict.get(inv_no, "") if fin_coy_dict else ""
+            fin_code = resolve_finance_subaccount(inv_no, cust_name, fin_coy, fin_data, default_code=None)
+            
+            if fin_code:
                 cat_key = "CAR_SALE_CREDIT"
+                subaccount = fin_code
+            elif is_finance_customer(cust_name):
+                cat_key = "CAR_SALE_CREDIT"
+                subaccount = cfg.get("subaccount_finance", "ARCODE FINANCE")
             else:
                 cat_key = "CAR_SALE_CASH"
+                subaccount = cfg["categories"]["CAR_SALE_CASH"]["subaccount"]
+                
             cat_cfg = cfg["categories"][cat_key]
-            subaccount = cat_cfg["subaccount"]
-            
             itemized_lines.append({
                 "category": cat_key,
                 "gl": cat_cfg["rev_gl"],
@@ -1114,6 +1276,11 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             cat_cfg = cfg["categories"].get(primary_cat_key, cfg["categories"]["DEPOSIT"])
             subaccount = cat_cfg["subaccount"]
             
+            if primary_cat_key == "COMM_FINANCE":
+                fin_code = resolve_finance_subaccount(inv_no, cust_name, "", fin_data, default_code=None)
+                if fin_code:
+                    subaccount = fin_code
+            
         for itm in itemized_lines:
             c_key = itm["category"]
             if c_key in cat_counts:
@@ -1142,7 +1309,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             "L": None,
             "M": inv_no,
             "N": narrative,
-            "O": doc_date_str,
+            "O": doc_date,
             "P": subaccount,
             "Q": None,
             "R": None,
@@ -1156,6 +1323,9 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         }
         rows_to_write.append(header_record)
         
+        # Blank Row immediately following Header (Autoline specification)
+        rows_to_write.append({"type": "BLANK"})
+        
         # Line 1: AR / Bank Line
         line1_debit = abs_gross if not is_cn else None
         line1_credit = abs_gross if is_cn else None
@@ -1168,7 +1338,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             "I": branch,
             "J": ar_dept,
             "K": ar_gl,
-            "L": None,
+            "L": stk_no if (is_wg and stk_no) else None,
             "M": line1_debit,
             "N": line1_credit,
             "O": narrative
@@ -1190,31 +1360,28 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 "I": branch,
                 "J": itm["dept"],
                 "K": itm["gl"],
-                "L": None,
+                "L": stk_no if (is_wg and stk_no) else None,
                 "M": itm_debit,
                 "N": itm_credit,
-                "O": itm["line_narrative"],
-                "Q": cfg["tax_code"]
+                "O": narrative if is_wg else itm["line_narrative"],
+                "Q": cfg["tax_code"],
+                "U": cogs_mfg if is_wg else None,
+                "V": cogs_model if is_wg else None,
+                "W": cogs_sale if is_wg else None
             }
             rows_to_write.append(line_record)
             line_num += 1
             
-        # Vehicle Cost Lines (Only for car sales when stock and cost are available)
-        stk_no = stock_dict.get(inv_no)
-        car_cost = cost_dict.get(stk_no, 0.0) if stk_no else 0.0
-        
+        # Vehicle Cost Lines (Primary: Vehicle GL 511001, Fallback: Legacy Stock & Cost files)
         if car_cost > 0:
             cogs_gl = int(cfg.get("vehicle_cogs_gl", 51111012))
             cogs_dept = str(cfg.get("vehicle_cogs_dept", "2002"))
             cogs_tax = cfg.get("vehicle_cogs_tax", "O")
-            cogs_mfg = cfg.get("vehicle_cogs_manufact", "JEEP")
-            cogs_model = cfg.get("vehicle_cogs_model", "JEEP-G6")
-            cogs_sale = cfg.get("vehicle_cogs_saletype", "TRADE")
             
             cogs_debit = car_cost if not is_cn else None
             cogs_credit = None if not is_cn else car_cost
             
-            # Line COGS (51111012)
+            # Line 3: COGS (51111012)
             cogs_record = {
                 "type": "DETAIL",
                 "D": batch_idx,
@@ -1223,10 +1390,10 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 "I": branch,
                 "J": cogs_dept,
                 "K": cogs_gl,
-                "L": None,
+                "L": stk_no if stk_no else None,
                 "M": cogs_debit,
                 "N": cogs_credit,
-                "O": f"{narrative}_{stk_no}"[:75],
+                "O": narrative,
                 "Q": cogs_tax,
                 "U": cogs_mfg,
                 "V": cogs_model,
@@ -1239,15 +1406,13 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 total_credit_sum += cogs_credit
             line_num += 1
             
-            # Line Inventory (11511111)
+            # Line 4: Inventory (11511111)
             inv_gl = int(cfg.get("vehicle_inv_gl", 11511111))
             inv_dept = str(cfg.get("vehicle_inv_dept", "0000"))
             inv_tax = cfg.get("vehicle_inv_tax", "O")
-            inv_mfg = cfg.get("vehicle_inv_manufact", "JEEP")
-            inv_model = cfg.get("vehicle_inv_model", "JEEP-G6")
             
             inv_debit = car_cost if is_cn else None
-            inv_credit = None if is_cn else car_cost
+            inv_credit = car_cost if not is_cn else None
             
             inv_record = {
                 "type": "DETAIL",
@@ -1257,13 +1422,14 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 "I": branch,
                 "J": inv_dept,
                 "K": inv_gl,
-                "L": None,
+                "L": stk_no if stk_no else None,
                 "M": inv_debit,
                 "N": inv_credit,
-                "O": f"{narrative}_{stk_no}"[:75],
+                "O": narrative,
                 "Q": inv_tax,
                 "U": inv_mfg,
-                "V": inv_model
+                "V": inv_model,
+                "W": None
             }
             rows_to_write.append(inv_record)
             if inv_debit is not None:
@@ -1292,12 +1458,13 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             "Date": doc_date_str,
             "Branch": branch,
             "Category": main_cat_cfg["name"],
-            "Customer": cust_name,
+            "Customer": clean_cust if is_wg else cust_name,
             "Subaccount": subaccount,
             "Net": abs_net if not is_cn else -abs_net,
             "VAT": abs_tax if not is_cn else -abs_tax,
             "Gross": abs_gross if not is_cn else -abs_gross,
             "Stock No": stk_no or "",
+            "VIN": vin_no or "",
             "Vehicle Cost": car_cost if car_cost > 0 else 0.0,
             "Items": len(itemized_lines) + (2 if car_cost > 0 else 0)
         })
@@ -1465,18 +1632,26 @@ with tab_sales:
         st.caption("ไฟล์รายงานภาษีขายประจำงวด (เช่น 2026VatReport.xlsx) *จำเป็น")
         vat_file = st.file_uploader("เลือกไฟล์รายงานภาษีขาย (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_vat_upload")
         
-        st.subheader("3. อัปโหลดรายงานเลขสต๊อกรถ (Stock Number Report)")
-        st.caption("ไฟล์จับคู่เลขสต๊อกและบิลขาย (เช่น StockNumber2026.xlsx) *ทางเลือก")
-        stock_file = st.file_uploader("เลือกไฟล์เลขสต๊อกรถ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_stock_upload")
+        st.subheader("3. อัปโหลดบัญชีแยกประเภทรถยนต์ (Vehicle GL Report)")
+        st.caption("ไฟล์บัญชีแยกประเภทหมวดรถยนต์สำหรับต้นทุนและสต๊อก WG & WGCN (เช่น บัญชีแยกประเภท2026(Vehicle).xlsx) *แนะนำ: ไฟล์เดียวครบ")
+        veh_gl_file = st.file_uploader("เลือกไฟล์บัญชีแยกประเภทรถยนต์ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_veh_gl_upload")
         
     with col_s2:
         st.subheader("2. อัปโหลดรายงานบัญชีแยกประเภท (GL Report)")
         st.caption("ไฟล์บัญชีแยกประเภทสำหรับแยกหมวดเงินจอง/ป้ายแดง/ค่าจด/อุปกรณ์/คอม (เช่น บัญชีแยกประเภท2026.xlsx) *จำเป็น")
         gl_file = st.file_uploader("เลือกไฟล์บัญชีแยกประเภท (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_gl_upload")
         
-        st.subheader("4. อัปโหลดรายงานต้นทุนรถ (Vehicle Cost Report)")
-        st.caption("ไฟล์ราคาทุนรถยนต์ก่อน VAT (เช่น VehicleCost2026.xlsx) *ทางเลือก")
-        cost_file = st.file_uploader("เลือกไฟล์ต้นทุนรถยนต์ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_cost_upload")
+        st.subheader("4. อัปโหลดรหัสสถาบันการเงิน (Finance Code Mapping)")
+        st.caption("ไฟล์จับคู่รหัสสถาบันการเงินกับ Autoline (เช่น Finance Code.xlsx) *หากไม่เลือก ระบบจะใช้ไฟล์เริ่มต้นในระบบโดยอัตโนมัติ")
+        fin_file = st.file_uploader("เลือกไฟล์รหัสไฟแนนซ์ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_fin_upload")
+        
+    # Optional Legacy Expander
+    with st.expander("📁 ตัวเลือกเสริม: ไฟล์เลขสต๊อกและต้นทุนเดิม (Legacy Stock & Cost Files)", expanded=False):
+        leg_col1, leg_col2 = st.columns(2)
+        with leg_col1:
+            stock_file = st.file_uploader("เลือกไฟล์เลขสต๊อกรถ (StockNumber2026.xlsx)", type=["xlsx", "xls"], key="sales_stock_upload")
+        with leg_col2:
+            cost_file = st.file_uploader("เลือกไฟล์ต้นทุนรถยนต์ (VehicleCost2026.xlsx)", type=["xlsx", "xls"], key="sales_cost_upload")
         
     # Optional Config Expander
     with st.expander("⚙️ ตั้งค่า Fixed Values สำหรับฝ่ายขาย (Sales Settings)", expanded=False):
@@ -1486,7 +1661,7 @@ with tab_sales:
             veh_cogs_gl = st.text_input("GL Code ต้นทุนรถ (Vehicle COGS)", value="51111012")
             veh_inv_gl = st.text_input("GL Code สินค้าคงเหลือ (Inventory)", value="11511111")
         with cfg_col2:
-            sales_subacc_finance = st.text_input("Subaccount สถาบันการเงิน (Finance)", value="ARCODE FINANCE")
+            sales_subacc_finance = st.text_input("Subaccount สถาบันการเงิน (Finance Default)", value="ARCODE FINANCE")
             veh_cogs_dept = st.text_input("Department ต้นทุนรถ", value="2002")
             veh_inv_dept = st.text_input("Department สินค้าคงเหลือ", value="0000")
         with cfg_col3:
@@ -1524,14 +1699,50 @@ with tab_sales:
             with st.spinner("กำลังประมวลผลข้อมูลฝ่ายขายและจัดหมวดหมู่ทางบัญชี..."):
                 df_vat_sales = load_sales_vat_report(vat_file)
                 gl_dict_sales = load_gl_descriptions(gl_file)
-                stock_dict_sales = load_stock_numbers(stock_file) if stock_file else {}
+                
+                # Vehicle GL (Primary)
+                veh_gl_dict_sales = None
+                if veh_gl_file:
+                    veh_gl_dict_sales = load_vehicle_gl_cogs(veh_gl_file)
+                else:
+                    curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
+                    v_gl_cands = [f for f in os.listdir(curr_dir) if "Vehicle" in f and f.endswith((".xlsx", ".xls")) and not f.startswith(("VehicleCost", "~$"))]
+                    if v_gl_cands:
+                        veh_gl_dict_sales = load_vehicle_gl_cogs(os.path.join(curr_dir, v_gl_cands[0]))
+                
+                stock_dict_sales, fin_coy_sales, vin_dict_sales = ({}, {}, {})
+                if stock_file:
+                    stock_dict_sales, fin_coy_sales, vin_dict_sales = load_stock_numbers(stock_file)
+                else:
+                    curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
+                    cand_stocks = [f for f in os.listdir(curr_dir) if "StockNumber" in f and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
+                    if cand_stocks:
+                        try:
+                            stock_dict_sales, fin_coy_sales, vin_dict_sales = load_stock_numbers(os.path.join(curr_dir, cand_stocks[0]))
+                        except Exception:
+                            pass
                 cost_dict_sales = load_vehicle_costs(cost_file) if cost_file else {}
+                
+                fin_data_sales = None
+                if fin_file:
+                    fin_data_sales = load_finance_codes(fin_file)
+                else:
+                    curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
+                    default_fin_path = os.path.join(curr_dir, "Finance Code.xlsx")
+                    if os.path.exists(default_fin_path):
+                        fin_data_sales = load_finance_codes(default_fin_path)
+                    elif os.path.exists("Finance Code.xlsx"):
+                        fin_data_sales = load_finance_codes("Finance Code.xlsx")
                 
                 rows_sales, stats_sales, preview_sales = transform_sales_to_autoline(
                     df_vat_sales,
                     gl_dict_sales,
                     stock_dict=stock_dict_sales,
                     cost_dict=cost_dict_sales,
+                    fin_coy_dict=fin_coy_sales,
+                    fin_data=fin_data_sales,
+                    vehicle_gl_dict=veh_gl_dict_sales,
+                    vin_dict=vin_dict_sales,
                     user_config=sales_config_override
                 )
                 
@@ -1562,8 +1773,13 @@ with tab_sales:
             if stats_sales.get("unmatched_gl_count", 0) > 0:
                 st.warning(f"⚠️ พบเอกสารกลุ่ม D ที่ไม่พบในบัญชีแยกประเภทจำนวน {stats_sales['unmatched_gl_count']} ฉบับ (ระบบใช้ค่าเริ่มต้นเป็นเงินจอง)")
 
-            if stock_file and cost_file:
-                st.info(f"🚗 ข้อมูลต้นทุนรถ: จับคู่สำเร็จ {stats_sales['matched_cost_count']:,} คัน รวมต้นทุน {stats_sales['total_vehicle_cost']:,.2f} บาท (GL 51111012 / GL 11511111)")
+            if veh_gl_dict_sales:
+                st.info(f"🚗 ข้อมูลต้นทุนรถยนต์ (Vehicle GL): จับคู่ต้นทุนสำเร็จ {stats_sales['matched_cost_count']:,} คัน รวมต้นทุน {stats_sales['total_vehicle_cost']:,.2f} บาท (GL 51111012 / GL 11511111)")
+            elif stock_file and cost_file:
+                st.info(f"🚗 ข้อมูลต้นทุนรถ (Legacy Files): จับคู่สำเร็จ {stats_sales['matched_cost_count']:,} คัน รวมต้นทุน {stats_sales['total_vehicle_cost']:,.2f} บาท (GL 51111012 / GL 11511111)")
+
+            if fin_data_sales:
+                st.info(f"🏦 ข้อมูลสถาบันการเงิน: แมป Subaccount จากตาราง Finance Code เรียบร้อยแล้ว (ครอบคลุม {len(fin_data_sales['by_code'])} สถาบันการเงิน เช่น TISCO=T0006, TTB=A0107, KLeasing=A0011, Krungsri=K0001)")
 
             # Download Button for Sales
             st.markdown("---")
