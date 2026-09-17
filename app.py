@@ -1,6 +1,12 @@
 import streamlit as st
 import pandas as pd
 import openpyxl
+from src.sales_transformer import (
+    load_sales_vat_report,
+    load_gl_descriptions,
+    transform_sales_to_autoline,
+    DEFAULT_SALES_CONFIG
+)
 import json
 import os
 import sys
@@ -767,98 +773,220 @@ template_path = os.path.join(base_dir, "data", "output_template.xlsx")
 
 # Main Header
 st.markdown('<div class="main-header">🚗 Autoline Interface Bridge</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">ระบบแปลงข้อมูลบิลบริการและอะไหล่อัตโนมัติ เข้าสู่แบบฟอร์ม Autoline AR/AP Journal Import</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">ระบบแปลงข้อมูลบัญชีและภาษีเข้าสู่แบบฟอร์ม Autoline AR/AP Journal Import (รองรับทั้งฝ่ายบริการ Aftersales และ ฝ่ายขาย Vehicle Sales)</div>', unsafe_allow_html=True)
 
-col_up1, col_up2 = st.columns(2)
-with col_up1:
-    st.subheader("1. อัปโหลดไฟล์ HEADER")
-    st.caption("ไฟล์ที่มีเลขที่บิล, วันที่, ข้อมูลลูกค้า, และยอดรวม (.xlsx หรือ .csv)")
-    header_file = st.file_uploader("เลือกไฟล์ HEADER (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="header_upload")
+tab_aftersales, tab_sales = st.tabs([
+    "🔧 ฝ่ายบริการหลังการขาย (Aftersales: 01S / 02S)",
+    "🚗 ฝ่ายขายรถยนต์ (Vehicle Sales: 0XD / 0XWG)"
+])
+
+# =============================================================================
+# TAB 1: AFTERSALES INTERFACE
+# =============================================================================
+with tab_aftersales:
+    col_up1, col_up2 = st.columns(2)
+    with col_up1:
+        st.subheader("1. อัปโหลดไฟล์ HEADER")
+        st.caption("ไฟล์ที่มีเลขที่บิล, วันที่, ข้อมูลลูกค้า, และยอดรวม (.xlsx หรือ .csv)")
+        header_file = st.file_uploader("เลือกไฟล์ HEADER (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="header_upload")
+        
+    with col_up2:
+        st.subheader("2. อัปโหลดไฟล์ DETAIL")
+        st.caption("ไฟล์ที่มีรายการแยกตามหมวด อะไหล่ P, ค่าแรง L, บริการ S (.xlsx หรือ .csv)")
+        detail_file = st.file_uploader("เลือกไฟล์ DETAIL (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="detail_upload")
+
+    if header_file and detail_file:
+        try:
+            with st.spinner("กำลังแปลงข้อมูลและคำนวณดุลบัญชีอัตโนมัติ..."):
+                df_header, df_detail = load_and_validate_inputs(header_file, detail_file)
+                rows_to_write, summary_stats, preview_df = transform_to_autoline_data(
+                    df_header, df_detail
+                )
+                
+            st.success("✅ แปลงข้อมูลสำเร็จเรียบร้อย!")
+            
+            # KPI Dashboard
+            st.markdown("### 📊 สรุปตัวเลขและความสมดุลทางบัญชี (Balance Verification)")
+            kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+            
+            cn_label = f"Inv: {summary_stats['count_inv']:,} | CN: {summary_stats['count_cn']:,}" if summary_stats['count_cn'] > 0 else f"{summary_stats['count_inv']:,} ใบ"
+            kpi1.metric("จำนวนเอกสารทั้งหมด", f"{summary_stats['total_documents']:,} ฉบับ", delta=cn_label if summary_stats['count_cn'] > 0 else None)
+            
+            kpi2.metric(
+                "ยอดขายสุทธิ (Revenue)", 
+                f"{summary_stats['net_revenue']:,.2f} ฿",
+                delta=f"CN: -{summary_stats['cn_revenue']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+            )
+            kpi3.metric(
+                "ภาษี 7% (VAT)", 
+                f"{summary_stats['net_tax']:,.2f} ฿",
+                delta=f"CN: -{summary_stats['cn_tax']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+            )
+            kpi4.metric(
+                "ยอดลูกหนี้สุทธิ (AR)", 
+                f"{summary_stats['net_ar']:,.2f} ฿",
+                delta=f"CN: -{summary_stats['cn_ar']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+            )
+            kpi5.metric(
+                "ต้นทุนอะไหล่ (COGS)",
+                f"{summary_stats.get('total_parts_cogs', 0.0):,.2f} ฿",
+                delta="Dr 51211006 / Cr 11511112"
+            )
+            
+            if summary_stats["is_balanced"]:
+                kpi6.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta=f"ดุลครบทุกบิล ({summary_stats['total_documents']}/{summary_stats['total_documents']})")
+            else:
+                kpi6.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
+
+            # Download Button
+            st.markdown("---")
+            col_dl1, col_dl2 = st.columns([2, 1])
+            with col_dl1:
+                st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline")
+                st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR/AP (รองรับทั้งบิล ARI และใบลดหนี้ ARC พร้อมเว้นบรรทัดตามมาตรฐาน)")
+            with col_dl2:
+                excel_output = generate_output_excel(template_path, rows_to_write)
+                now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                st.download_button(
+                    label="⬇️ ดาวน์โหลด Autoline_Import.xlsx",
+                    data=excel_output,
+                    file_name=f"Autoline_Import_{now_str}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+            # Table Preview
+            st.markdown("### 🔍 ตรวจสอบข้อมูลก่อนดาวน์โหลด (Data Preview)")
+            search_kw = st.text_input("ค้นหาเอกสาร (เลขที่บิล, ใบลดหนี้, เลขที่อ้างอิง, ชื่อลูกค้า หรือ Doc Code)", placeholder="เช่น 01SC26050001, ARC, HA0027, SINVOICV", key="af_search")
+            
+            display_df = preview_df
+            if search_kw.strip():
+                kw = search_kw.strip().lower()
+                mask = (
+                    preview_df["Invoice"].astype(str).str.lower().str.contains(kw, na=False) |
+                    preview_df["Narrative"].astype(str).str.lower().str.contains(kw, na=False) |
+                    preview_df["Doc Code"].astype(str).str.lower().str.contains(kw, na=False) |
+                    preview_df["Doc Seq"].astype(str).str.lower().str.contains(kw, na=False) |
+                    preview_df["Row Type"].astype(str).str.lower().str.contains(kw, na=False)
+                )
+                display_df = preview_df[mask]
+                
+            st.dataframe(display_df, use_container_width=True, height=450)
+            
+        except Exception as e:
+            st.error(f"เกิดข้อผิดพลาดในการประมวลผล: {str(e)}")
+    else:
+        st.info("💡 กรุณาอัปโหลดไฟล์ HEADER และ DETAIL ด้านบนเพื่อเริ่มต้นแปลงข้อมูลงานบริการหลังการขาย")
+
+# =============================================================================
+# TAB 2: VEHICLE SALES INTERFACE (0XD / 0XDC / 0XWG / 0XWGCN)
+# =============================================================================
+with tab_sales:
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        st.subheader("1. อัปโหลดรายงานภาษีขาย (Sales VAT Report)")
+        st.caption("ไฟล์รายงานภาษีขายประจำงวด (เช่น 2026VatReport.xlsx)")
+        vat_file = st.file_uploader("เลือกไฟล์รายงานภาษีขาย (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_vat_upload")
+        
+    with col_s2:
+        st.subheader("2. อัปโหลดรายงานบัญชีแยกประเภท (GL Report)")
+        st.caption("ไฟล์บัญชีแยกประเภทสำหรับแยกหมวดเงินจอง/ป้ายแดง/ค่าจด/อุปกรณ์/คอม (เช่น บัญชีแยกประเภท2026.xlsx)")
+        gl_file = st.file_uploader("เลือกไฟล์บัญชีแยกประเภท (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_gl_upload")
+        
+    # Optional Config Expander
+    with st.expander("⚙️ ตั้งค่า Fixed Values สำหรับฝ่ายขาย (Sales Settings)", expanded=False):
+        cfg_col1, cfg_col2, cfg_col3 = st.columns(3)
+        with cfg_col1:
+            sales_subacc_default = st.text_input("Subaccount ลูกค้าทั่วไป (Default)", value="X0003")
+        with cfg_col2:
+            sales_subacc_finance = st.text_input("Subaccount สถาบันการเงิน (Finance)", value="ARCODE FINANCE")
+        with cfg_col3:
+            sales_dept = st.text_input("รหัสแผนกฝ่ายขาย (Sales Department)", value="2002")
+            
+    sales_config_override = {
+        "subaccount_default": sales_subacc_default,
+        "subaccount_finance": sales_subacc_finance
+    }
+    # Update category configs if changed
+    sales_config_override["categories"] = {
+        "DEPOSIT": {"subaccount": sales_subacc_default},
+        "RED_PLATE": {"subaccount": sales_subacc_default},
+        "REGISTRATION": {"subaccount": sales_subacc_default, "rev_dept": sales_dept},
+        "ACCESSORIES": {"subaccount": sales_subacc_default, "rev_dept": sales_dept},
+        "COMM_FINANCE": {"subaccount": sales_subacc_finance, "rev_dept": sales_dept},
+        "CAR_SALE_CASH": {"subaccount": sales_subacc_default, "rev_dept": sales_dept},
+        "CAR_SALE_CREDIT": {"subaccount": sales_subacc_finance, "rev_dept": sales_dept}
+    }
     
-with col_up2:
-    st.subheader("2. อัปโหลดไฟล์ DETAIL")
-    st.caption("ไฟล์ที่มีรายการแยกตามหมวด อะไหล่ P, ค่าแรง L, บริการ S (.xlsx หรือ .csv)")
-    detail_file = st.file_uploader("เลือกไฟล์ DETAIL (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="detail_upload")
+    if vat_file and gl_file:
+        try:
+            with st.spinner("กำลังประมวลผลข้อมูลฝ่ายขายและจัดหมวดหมู่ทางบัญชี..."):
+                df_vat_sales = load_sales_vat_report(vat_file)
+                gl_dict_sales = load_gl_descriptions(gl_file)
+                rows_sales, stats_sales, preview_sales = transform_sales_to_autoline(
+                    df_vat_sales, gl_dict_sales, user_config=sales_config_override
+                )
+                
+            st.success("✅ แปลงข้อมูลฝ่ายขายสำเร็จเรียบร้อย!")
+            
+            # Sales KPI Dashboard
+            st.markdown("### 📊 สรุปข้อมูลธุรกรรมฝ่ายขาย (Vehicle Sales Summary)")
+            skpi1, skpi2, skpi3, skpi4 = st.columns(4)
+            skpi1.metric("จำนวนบิลที่แปลง (Invoices)", f"{stats_sales['total_invoices']:,} ฉบับ")
+            skpi2.metric("จำนวนรายการบัญชี (Lines)", f"{len(rows_sales):,} บรรทัด")
+            skpi3.metric("ยอดรวมเดบิต (Total Debit)", f"{stats_sales['total_debit']:,.2f} ฿")
+            skpi4.metric("ยอดรวมภาษี (Total Tax)", f"{stats_sales['total_tax']:,.2f} ฿")
+            
+            # Breakdown by Category
+            st.markdown("### 🚗 จำแนกยอดตามหมวดหมู่ธุรกรรม")
+            cat_df = pd.DataFrame([
+                {
+                    "หมวดหมู่ธุรกรรม (Category)": k,
+                    "จำนวนรายการ (Items)": stats_sales["category_counts"].get(k, 0),
+                    "มูลค่าก่อนภาษี (Net Amount ฿)": f"{stats_sales['category_values'].get(k, 0.0):,.2f}"
+                }
+                for k in stats_sales["category_counts"]
+            ])
+            st.dataframe(cat_df, use_container_width=True, hide_index=True)
+            
+            if stats_sales.get("unmatched_gl_count", 0) > 0:
+                st.warning(f"⚠️ พบเอกสารกลุ่ม D ที่ไม่พบในบัญชีแยกประเภทจำนวน {stats_sales['unmatched_gl_count']} ฉบับ (ระบบใช้ค่าเริ่มต้นเป็นเงินจอง)")
 
-if header_file and detail_file:
-    try:
-        with st.spinner("กำลังแปลงข้อมูลและคำนวณดุลบัญชีอัตโนมัติ..."):
-            df_header, df_detail = load_and_validate_inputs(header_file, detail_file)
-            rows_to_write, summary_stats, preview_df = transform_to_autoline_data(
-                df_header, df_detail
-            )
+            # Download Button for Sales
+            st.markdown("---")
+            col_sdl1, col_sdl2 = st.columns([2, 1])
+            with col_sdl1:
+                st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (ฝ่ายขาย)")
+                st.caption("ไฟล์ Excel พร้อมสำหรับการ Import เข้าสู่ระบบ Autoline")
+            with col_sdl2:
+                excel_sales_output = generate_output_excel(template_path, rows_sales)
+                now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                st.download_button(
+                    label="⬇️ ดาวน์โหลด Autoline_Import_SALES.xlsx",
+                    data=excel_sales_output,
+                    file_name=f"Autoline_Import_SALES_{now_str}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+            # Table Preview for Sales
+            st.markdown("### 🔍 ตรวจสอบรายการเอกสาร (Sales Data Preview)")
+            search_sales_kw = st.text_input("ค้นหาเอกสารฝ่ายขาย (เลขที่บิล, ชื่อลูกค้า, หรือหมวดหมู่)", placeholder="เช่น 01WG26020001, 01D26010001, เงินจอง, ธนาคาร, X0003", key="sales_search")
             
-        st.success("✅ แปลงข้อมูลสำเร็จเรียบร้อย!")
-        
-        # KPI Dashboard
-        st.markdown("### 📊 สรุปตัวเลขและความสมดุลทางบัญชี (Balance Verification)")
-        kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
-        
-        cn_label = f"Inv: {summary_stats['count_inv']:,} | CN: {summary_stats['count_cn']:,}" if summary_stats['count_cn'] > 0 else f"{summary_stats['count_inv']:,} ใบ"
-        kpi1.metric("จำนวนเอกสารทั้งหมด", f"{summary_stats['total_documents']:,} ฉบับ", delta=cn_label if summary_stats['count_cn'] > 0 else None)
-        
-        kpi2.metric(
-            "ยอดขายสุทธิ (Revenue)", 
-            f"{summary_stats['net_revenue']:,.2f} ฿",
-            delta=f"CN: -{summary_stats['cn_revenue']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
-        )
-        kpi3.metric(
-            "ภาษี 7% (VAT)", 
-            f"{summary_stats['net_tax']:,.2f} ฿",
-            delta=f"CN: -{summary_stats['cn_tax']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
-        )
-        kpi4.metric(
-            "ยอดลูกหนี้สุทธิ (AR)", 
-            f"{summary_stats['net_ar']:,.2f} ฿",
-            delta=f"CN: -{summary_stats['cn_ar']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
-        )
-        kpi5.metric(
-            "ต้นทุนอะไหล่ (COGS)",
-            f"{summary_stats.get('total_parts_cogs', 0.0):,.2f} ฿",
-            delta="Dr 51211006 / Cr 11511112"
-        )
-        
-        if summary_stats["is_balanced"]:
-            kpi6.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta=f"ดุลครบทุกบิล ({summary_stats['total_documents']}/{summary_stats['total_documents']})")
-        else:
-            kpi6.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
-
-        # Download Button
-        st.markdown("---")
-        col_dl1, col_dl2 = st.columns([2, 1])
-        with col_dl1:
-            st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline")
-            st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR/AP (รองรับทั้งบิล ARI และใบลดหนี้ ARC พร้อมเว้นบรรทัดตามมาตรฐาน)")
-        with col_dl2:
-            excel_output = generate_output_excel(template_path, rows_to_write)
-            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            st.download_button(
-                label="⬇️ ดาวน์โหลด Autoline_Import.xlsx",
-                data=excel_output,
-                file_name=f"Autoline_Import_{now_str}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            display_sales_df = preview_sales
+            if search_sales_kw.strip():
+                skw = search_sales_kw.strip().lower()
+                smask = (
+                    preview_sales["Invoice"].astype(str).str.lower().str.contains(skw, na=False) |
+                    preview_sales["Customer"].astype(str).str.lower().str.contains(skw, na=False) |
+                    preview_sales["Category"].astype(str).str.lower().str.contains(skw, na=False) |
+                    preview_sales["Subaccount"].astype(str).str.lower().str.contains(skw, na=False)
+                )
+                display_sales_df = preview_sales[smask]
+                
+            st.dataframe(display_sales_df, use_container_width=True, height=450)
             
-        # Table Preview
-        st.markdown("### 🔍 ตรวจสอบข้อมูลก่อนดาวน์โหลด (Data Preview)")
-        search_kw = st.text_input("ค้นหาเอกสาร (เลขที่บิล, ใบลดหนี้, เลขที่อ้างอิง, ชื่อลูกค้า หรือ Doc Code)", placeholder="เช่น 01SC26050001, ARC, HA0027, SINVOICV")
-        
-        display_df = preview_df
-        if search_kw.strip():
-            kw = search_kw.strip().lower()
-            mask = (
-                preview_df["Invoice"].astype(str).str.lower().str.contains(kw, na=False) |
-                preview_df["Narrative"].astype(str).str.lower().str.contains(kw, na=False) |
-                preview_df["Doc Code"].astype(str).str.lower().str.contains(kw, na=False) |
-                preview_df["Doc Seq"].astype(str).str.lower().str.contains(kw, na=False) |
-                preview_df["Row Type"].astype(str).str.lower().str.contains(kw, na=False)
-            )
-            display_df = preview_df[mask]
-            
-        st.dataframe(display_df, use_container_width=True, height=450)
-        
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการประมวลผล: {str(e)}")
-else:
-    st.info("💡 กรุณาอัปโหลดไฟล์ HEADER และ DETAIL ด้านบนเพื่อเริ่มต้นแปลงข้อมูล")
+        except Exception as e:
+            st.error(f"เกิดข้อผิดพลาดในการประมวลผลฝ่ายขาย: {str(e)}")
+    else:
+        st.info("💡 กรุณาอัปโหลดไฟล์ รายงานภาษีขาย และ รายงานบัญชีแยกประเภท ด้านบนเพื่อเริ่มต้นแปลงข้อมูลฝ่ายขาย")
