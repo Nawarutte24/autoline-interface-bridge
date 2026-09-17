@@ -947,11 +947,14 @@ def load_gl_descriptions(file_or_path):
     return gl_map
 
 def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
-    cfg = DEFAULT_SALES_CONFIG.copy()
+    import copy
+    cfg = copy.deepcopy(DEFAULT_SALES_CONFIG)
     if user_config:
         for k, v in user_config.items():
             if k == "categories" and isinstance(v, dict):
-                cfg["categories"].update(v)
+                for cat_name, cat_overrides in v.items():
+                    if cat_name in cfg["categories"]:
+                        cfg["categories"][cat_name].update(cat_overrides)
             else:
                 cfg[k] = v
                 
