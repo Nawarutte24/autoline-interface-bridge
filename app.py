@@ -825,6 +825,8 @@ FINANCE_KEYWORDS = [
 
 def resolve_sales_branch(invoice_number):
     inv_str = str(invoice_number or "").strip()
+    if len(inv_str) >= 2 and inv_str[:2].isdigit():
+        return f"00{inv_str[:2]}"
     if inv_str.startswith("02"):
         return "0002"
     return "0001"
@@ -1179,7 +1181,21 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
     rows_to_write = []
     preview_rows = []
     
-    batch_idx = 1
+    from collections import defaultdict
+    branch_batches = defaultdict(int)
+    branch_rows = defaultdict(list)
+    branch_previews = defaultdict(list)
+    branch_stats_data = defaultdict(lambda: {
+        "total_invoices": 0,
+        "total_batches": 0,
+        "total_debit": 0.0,
+        "total_credit": 0.0,
+        "total_tax": 0.0,
+        "total_vehicle_cost": 0.0,
+        "matched_cost_count": 0,
+    })
+    
+    global_batch_idx = 1
     total_debit_sum = 0.0
     total_credit_sum = 0.0
     total_tax_sum = 0.0
@@ -1207,6 +1223,18 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         abs_net = abs(net_val)
         
         branch = resolve_sales_branch(inv_no)
+        branch_batches[branch] += 1
+        b_batch_idx = branch_batches[branch]
+        g_batch_idx = global_batch_idx
+        
+        def add_record(rec):
+            if rec.get("type") == "BLANK":
+                rows_to_write.append({"type": "BLANK"})
+                branch_rows[branch].append({"type": "BLANK"})
+            else:
+                rows_to_write.append(dict(rec, D=g_batch_idx))
+                branch_rows[branch].append(dict(rec, D=b_batch_idx))
+                
         is_wg = inv_no.startswith(('01WG', '02WG'))
         
         doc_code = "ARC" if is_cn else "ARI"
@@ -1313,19 +1341,28 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                             "line_narrative": f"{inv_no}_{l_desc}"[:75]
                         })
                 else:
-                    primary_cat = classify_description_text(gl_lines[0]["desc"])
-                    cat_cfg = cfg["categories"].get(primary_cat, cfg["categories"]["DEPOSIT"])
+                    l_cat = classify_description_text(gl_lines[0]["desc"]) if gl_lines else "DEPOSIT"
+                    l_cat_cfg = cfg["categories"].get(l_cat, cfg["categories"]["DEPOSIT"])
                     itemized_lines.append({
-                        "category": primary_cat,
-                        "gl": cat_cfg["rev_gl"],
-                        "dept": cat_cfg["rev_dept"],
+                        "category": l_cat,
+                        "gl": l_cat_cfg["rev_gl"],
+                        "dept": l_cat_cfg["rev_dept"],
                         "net_amount": abs_net,
                         "line_narrative": narrative
                     })
+            elif len(gl_lines) == 1:
+                l_cat = classify_description_text(gl_lines[0]["desc"])
+                l_cat_cfg = cfg["categories"].get(l_cat, cfg["categories"]["DEPOSIT"])
+                itemized_lines.append({
+                    "category": l_cat,
+                    "gl": l_cat_cfg["rev_gl"],
+                    "dept": l_cat_cfg["rev_dept"],
+                    "net_amount": abs_net,
+                    "line_narrative": narrative
+                })
             else:
-                primary_desc = gl_lines[0]["desc"] if gl_lines else ""
-                cat_key = classify_description_text(primary_desc)
-                cat_cfg = cfg["categories"].get(cat_key, cfg["categories"]["DEPOSIT"])
+                cat_key = "DEPOSIT"
+                cat_cfg = cfg["categories"][cat_key]
                 itemized_lines.append({
                     "category": cat_key,
                     "gl": cat_cfg["rev_gl"],
@@ -1334,25 +1371,23 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                     "line_narrative": narrative
                 })
                 
-            primary_cat_key = itemized_lines[0]["category"]
-            cat_cfg = cfg["categories"].get(primary_cat_key, cfg["categories"]["DEPOSIT"])
-            subaccount = cat_cfg["subaccount"]
+            main_cat = itemized_lines[0]["category"]
+            main_cat_cfg = cfg["categories"].get(main_cat, cfg["categories"]["DEPOSIT"])
+            subaccount = main_cat_cfg["subaccount"]
             
-            if primary_cat_key == "COMM_FINANCE":
+            if main_cat == "COMM_FINANCE":
                 fin_code = resolve_finance_subaccount(inv_no, cust_name, "", fin_data, default_code=None)
                 if fin_code:
                     subaccount = fin_code
             
-        for itm in itemized_lines:
-            c_key = itm["category"]
-            if c_key in cat_counts:
-                cat_counts[c_key] += 1
-                cat_values[c_key] += itm["net_amount"]
-                
-        main_cat_key = itemized_lines[0]["category"]
-        main_cat_cfg = cfg["categories"].get(main_cat_key, cfg["categories"]["DEPOSIT"])
-        ar_gl = main_cat_cfg["ar_gl"]
-        ar_dept = main_cat_cfg["ar_dept"]
+        main_cat = itemized_lines[0]["category"]
+        main_cat_cfg = cfg["categories"].get(main_cat, cfg["categories"]["DEPOSIT"])
+        
+        ar_dept = main_cat_cfg.get("ar_dept", cfg.get("ar_department", "0000"))
+        ar_gl = int(main_cat_cfg.get("ar_gl", cfg.get("ar_gl_code", 11311001)))
+        
+        cat_counts[main_cat] += 1
+        cat_values[main_cat] += abs_net
         
         # Header Record
         header_record = {
@@ -1360,7 +1395,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             "A": inv_no,
             "B": inv_no,
             "C": 1,
-            "D": batch_idx,
+            "D": None,
             "E": None,
             "F": doc_code,
             "G": cfg["currency"],
@@ -1383,10 +1418,10 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             "X": branch,
             "Y": None
         }
-        rows_to_write.append(header_record)
+        add_record(header_record)
         
         # Blank Row immediately following Header (Autoline specification)
-        rows_to_write.append({"type": "BLANK"})
+        add_record({"type": "BLANK"})
         
         # Line 1: AR / Bank Line
         line1_debit = abs_gross if not is_cn else None
@@ -1394,7 +1429,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         
         line1_record = {
             "type": "DETAIL",
-            "D": batch_idx,
+            "D": None,
             "G": cfg["currency"],
             "H": 1,
             "I": branch,
@@ -1405,7 +1440,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             "N": line1_credit,
             "O": narrative
         }
-        rows_to_write.append(line1_record)
+        add_record(line1_record)
         
         # Line 2+: Revenue / Liability Lines
         line_num = 2
@@ -1416,7 +1451,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             
             line_record = {
                 "type": "DETAIL",
-                "D": batch_idx,
+                "D": None,
                 "G": cfg["currency"],
                 "H": line_num,
                 "I": branch,
@@ -1431,7 +1466,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 "V": cogs_model if is_wg else None,
                 "W": cogs_sale if is_wg else None
             }
-            rows_to_write.append(line_record)
+            add_record(line_record)
             line_num += 1
             
         # Vehicle Cost Lines (Primary: Vehicle GL 511001, Fallback: Legacy Stock & Cost files)
@@ -1446,7 +1481,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             # Line 3: COGS (51111012)
             cogs_record = {
                 "type": "DETAIL",
-                "D": batch_idx,
+                "D": None,
                 "G": cfg["currency"],
                 "H": line_num,
                 "I": branch,
@@ -1461,7 +1496,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 "V": cogs_model,
                 "W": cogs_sale
             }
-            rows_to_write.append(cogs_record)
+            add_record(cogs_record)
             if cogs_debit is not None:
                 total_debit_sum += cogs_debit
             if cogs_credit is not None:
@@ -1478,7 +1513,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             
             inv_record = {
                 "type": "DETAIL",
-                "D": batch_idx,
+                "D": None,
                 "G": cfg["currency"],
                 "H": line_num,
                 "I": branch,
@@ -1493,7 +1528,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 "V": inv_model,
                 "W": None
             }
-            rows_to_write.append(inv_record)
+            add_record(inv_record)
             if inv_debit is not None:
                 total_debit_sum += inv_debit
             if inv_credit is not None:
@@ -1503,7 +1538,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             matched_cost_count += 1
             total_vehicle_cost += car_cost
             
-        rows_to_write.append({"type": "BLANK"})
+        add_record({"type": "BLANK"})
         
         total_tax_sum += abs_tax
         if not is_cn:
@@ -1513,8 +1548,8 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             total_credit_sum += abs_gross
             total_debit_sum += abs_net
             
-        preview_rows.append({
-            "Batch": batch_idx,
+        p_row = {
+            "Batch": b_batch_idx,
             "Invoice": inv_no,
             "Type": doc_code,
             "Date": doc_date_str,
@@ -1529,13 +1564,45 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             "VIN": vin_no or "",
             "Vehicle Cost": car_cost if car_cost > 0 else 0.0,
             "Items": len(itemized_lines) + (2 if car_cost > 0 else 0)
-        })
+        }
+        preview_rows.append(p_row)
+        branch_previews[branch].append(p_row)
         
-        batch_idx += 1
+        b_st = branch_stats_data[branch]
+        b_st["total_invoices"] += 1
+        b_st["total_batches"] = b_batch_idx
+        b_st["total_tax"] += abs_tax
+        if not is_cn:
+            b_st["total_debit"] += abs_gross
+            b_st["total_credit"] += abs_net
+        else:
+            b_st["total_credit"] += abs_gross
+            b_st["total_debit"] += abs_net
+        if car_cost > 0:
+            b_st["matched_cost_count"] += 1
+            b_st["total_vehicle_cost"] += car_cost
+            
+        global_batch_idx += 1
+        
+    by_branch = {}
+    for b in sorted(branch_batches.keys()):
+        b_st = branch_stats_data[b]
+        by_branch[b] = {
+            "branch": b,
+            "rows": branch_rows[b],
+            "total_invoices": b_st["total_invoices"],
+            "total_batches": b_st["total_batches"],
+            "total_debit": round(b_st["total_debit"], 2),
+            "total_credit": round(b_st["total_credit"], 2),
+            "total_tax": round(b_st["total_tax"], 2),
+            "total_vehicle_cost": round(b_st["total_vehicle_cost"], 2),
+            "matched_cost_count": b_st["matched_cost_count"],
+            "preview": pd.DataFrame(branch_previews[b])
+        }
         
     summary_stats = {
         "total_invoices": len(df_vat),
-        "total_batches": batch_idx - 1,
+        "total_batches": global_batch_idx - 1,
         "total_debit": round(total_debit_sum, 2),
         "total_credit": round(total_credit_sum, 2),
         "total_tax": round(total_tax_sum, 2),
@@ -1543,7 +1610,8 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         "matched_cost_count": matched_cost_count,
         "unmatched_gl_count": unmatched_gl_count,
         "category_counts": {cfg["categories"][k]["name"]: cat_counts[k] for k in cat_counts},
-        "category_values": {cfg["categories"][k]["name"]: cat_values[k] for k in cat_values}
+        "category_values": {cfg["categories"][k]["name"]: cat_values[k] for k in cat_values},
+        "by_branch": by_branch
     }
     
     return rows_to_write, summary_stats, pd.DataFrame(preview_rows)
@@ -1810,6 +1878,15 @@ with tab_sales:
             skpi3.metric("ยอดรวมเดบิต (Total Debit)", f"{stats_sales['total_debit']:,.2f} ฿", delta=cogs_delta)
             skpi4.metric("ยอดรวมภาษี (Total Tax)", f"{stats_sales['total_tax']:,.2f} ฿")
             
+            by_branch = stats_sales.get("by_branch", {})
+            if len(by_branch) > 1:
+                st.markdown("#### 🏢 จำแนกยอดตามสาขา (Branch Breakdown)")
+                branch_cols = st.columns(len(by_branch))
+                for idx_b, (b_code, b_data) in enumerate(sorted(by_branch.items())):
+                    with branch_cols[idx_b]:
+                        b_name = "สำนักงานใหญ่" if b_code == "0001" else ("เกษตรนวมินทร์" if b_code == "0002" else f"สาขา {b_code}")
+                        st.info(f"**🏢 สาขา {b_code} ({b_name})**\n- จำนวนบิล: **{b_data['total_invoices']:,}** ฉบับ\n- ยอดเดบิต: **{b_data['total_debit']:,.2f}** ฿\n- ภาษี: **{b_data['total_tax']:,.2f}** ฿\n- ต้นทุนรถ: **{b_data['total_vehicle_cost']:,.2f}** ฿ ({b_data['matched_cost_count']} คัน)")
+            
             # Breakdown by Category
             st.markdown("### 🚗 จำแนกยอดตามหมวดหมู่ธุรกรรม")
             cat_df = pd.DataFrame([
@@ -1833,38 +1910,101 @@ with tab_sales:
             if fin_data_sales:
                 st.info(f"🏦 ข้อมูลสถาบันการเงิน: แมป Subaccount จากตาราง Finance Code เรียบร้อยแล้ว (ครอบคลุม {len(fin_data_sales['by_code'])} สถาบันการเงิน เช่น TISCO=T0006, TTB=A0107, KLeasing=A0011, Krungsri=K0001)")
 
-            # Download Button for Sales
+            # Download Buttons for Sales (Branch Separated & ZIP Package)
             st.markdown("---")
-            col_sdl1, col_sdl2 = st.columns([2, 1])
-            with col_sdl1:
-                st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (ฝ่ายขาย)")
-                st.caption("ไฟล์ Excel พร้อมสำหรับการ Import เข้าสู่ระบบ Autoline")
-            with col_sdl2:
-                excel_sales_output = generate_output_excel(template_path, rows_sales)
-                now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (ฝ่ายขาย - แยกตามสาขา)")
+            st.caption("ระบบแยกไฟล์ตามรหัสสาขาและรันเลข Batch เริ่มต้นนับ 1 ใหม่ในแต่ละไฟล์ เพื่อความพร้อมในการ Import เข้าสู่ Autoline ทันที")
+            
+            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            if len(by_branch) > 1:
+                col_btns = st.columns(len(by_branch) + 1)
+                branch_excels = {}
+                for idx_b, (b_code, b_data) in enumerate(sorted(by_branch.items())):
+                    b_name = "สำนักงานใหญ่" if b_code == "0001" else ("เกษตรนวมินทร์" if b_code == "0002" else f"สาขา {b_code}")
+                    b_excel = generate_output_excel(template_path, b_data["rows"])
+                    branch_excels[b_code] = b_excel
+                    with col_btns[idx_b]:
+                        st.download_button(
+                            label=f"⬇️ โหลดไฟล์ สาขา {b_code}\n({b_name}: {b_data['total_invoices']:,} ฉบับ)",
+                            data=b_excel,
+                            file_name=f"Autoline_Import_SALES_BRANCH{b_code}_{now_str}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"dl_branch_{b_code}",
+                            use_container_width=True
+                        )
+                        
+                import zipfile
+                zip_buffer = BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for b_code, b_excel in branch_excels.items():
+                        zf.writestr(f"Autoline_Import_SALES_BRANCH{b_code}_{now_str}.xlsx", b_excel.getvalue())
+                zip_buffer.seek(0)
+                
+                with col_btns[-1]:
+                    st.download_button(
+                        label=f"📦 ดาวน์โหลดทุกสาขา (ZIP)\n({len(by_branch)} ไฟล์สาขา)",
+                        data=zip_buffer,
+                        file_name=f"Autoline_Import_SALES_ALL_BRANCHES_{now_str}.zip",
+                        mime="application/zip",
+                        key="dl_sales_zip",
+                        use_container_width=True
+                    )
+                    
+                with st.expander("📁 ต้องการดาวน์โหลดไฟล์รวมทุกสาขาในไฟล์เดียว (Combined All Branches)", expanded=False):
+                    excel_combined = generate_output_excel(template_path, rows_sales)
+                    st.download_button(
+                        label=f"⬇️ ดาวน์โหลด Autoline_Import_SALES_COMBINED_{now_str}.xlsx ({stats_sales['total_invoices']:,} ฉบับ)",
+                        data=excel_combined,
+                        file_name=f"Autoline_Import_SALES_COMBINED_{now_str}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_sales_combined"
+                    )
+            else:
+                b_code = list(by_branch.keys())[0] if by_branch else "0001"
+                b_data = by_branch.get(b_code, {"rows": rows_sales, "total_invoices": stats_sales['total_invoices']})
+                b_name = "สำนักงานใหญ่" if b_code == "0001" else ("เกษตรนวมินทร์" if b_code == "0002" else f"สาขา {b_code}")
+                excel_sales_output = generate_output_excel(template_path, b_data["rows"])
                 st.download_button(
-                    label="⬇️ ดาวน์โหลด Autoline_Import_SALES.xlsx",
+                    label=f"⬇️ ดาวน์โหลด Autoline_Import_SALES_BRANCH{b_code}.xlsx ({b_name}: {b_data['total_invoices']:,} ฉบับ)",
                     data=excel_sales_output,
-                    file_name=f"Autoline_Import_SALES_{now_str}.xlsx",
+                    file_name=f"Autoline_Import_SALES_BRANCH{b_code}_{now_str}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
+                    key=f"dl_branch_{b_code}_single",
+                    use_container_width=False
                 )
                 
             # Table Preview for Sales
             st.markdown("### 🔍 ตรวจสอบรายการเอกสาร (Sales Data Preview)")
-            search_sales_kw = st.text_input("ค้นหาเอกสารฝ่ายขาย (เลขที่บิล, ชื่อลูกค้า, เลขสต๊อก หรือหมวดหมู่)", placeholder="เช่น 01WG26020001, N001960, 01D26010001, เงินจอง, ธนาคาร, X0003", key="sales_search")
-            
+            col_p1, col_p2 = st.columns([3, 1])
+            with col_p1:
+                search_sales_kw = st.text_input(
+                    "ค้นหาเอกสารฝ่ายขาย (เลขที่บิล, ชื่อลูกค้า, เลขสต๊อก หรือหมวดหมู่)",
+                    placeholder="เช่น 01WG26020001, N001960, 01D26010001, เงินจอง, ธนาคาร, X0003",
+                    key="sales_search"
+                )
+            with col_p2:
+                branch_options = ["ทุกสาขา (All Branches)"] + [
+                    f"สาขา {b} ({'สำนักงานใหญ่' if b == '0001' else ('เกษตรนวมินทร์' if b == '0002' else b)})"
+                    for b in sorted(by_branch.keys())
+                ]
+                sel_branch = st.selectbox("กรองตามสาขา", branch_options, key="sales_branch_filter")
+                
             display_sales_df = preview_sales
+            if sel_branch != "ทุกสาขา (All Branches)":
+                b_target = sel_branch.split()[1]
+                display_sales_df = display_sales_df[display_sales_df["Branch"] == b_target]
+                
             if search_sales_kw.strip():
                 skw = search_sales_kw.strip().lower()
                 smask = (
-                    preview_sales["Invoice"].astype(str).str.lower().str.contains(skw, na=False) |
-                    preview_sales["Customer"].astype(str).str.lower().str.contains(skw, na=False) |
-                    preview_sales["Category"].astype(str).str.lower().str.contains(skw, na=False) |
-                    preview_sales["Subaccount"].astype(str).str.lower().str.contains(skw, na=False) |
-                    preview_sales["Stock No"].astype(str).str.lower().str.contains(skw, na=False)
+                    display_sales_df["Invoice"].astype(str).str.lower().str.contains(skw, na=False) |
+                    display_sales_df["Customer"].astype(str).str.lower().str.contains(skw, na=False) |
+                    display_sales_df["Category"].astype(str).str.lower().str.contains(skw, na=False) |
+                    display_sales_df["Subaccount"].astype(str).str.lower().str.contains(skw, na=False) |
+                    display_sales_df["Stock No"].astype(str).str.lower().str.contains(skw, na=False)
                 )
-                display_sales_df = preview_sales[smask]
+                display_sales_df = display_sales_df[smask]
                 
             st.dataframe(display_sales_df, use_container_width=True, height=450)
             
