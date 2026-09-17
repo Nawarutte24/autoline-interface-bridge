@@ -747,6 +747,17 @@ DEFAULT_SALES_CONFIG = {
     "currency": "THB",
     "tax_code": "S",
     "terms": 30,
+    "vehicle_cogs_gl": 51111012,
+    "vehicle_cogs_dept": "2002",
+    "vehicle_cogs_tax": "O",
+    "vehicle_cogs_manufact": "JEEP",
+    "vehicle_cogs_model": "JEEP-G6",
+    "vehicle_cogs_saletype": "TRADE",
+    "vehicle_inv_gl": 11511111,
+    "vehicle_inv_dept": "0000",
+    "vehicle_inv_tax": "O",
+    "vehicle_inv_manufact": "JEEP",
+    "vehicle_inv_model": "JEEP-G6",
     "categories": {
         "DEPOSIT": {
             "name": "เงินจองรถยนต์",
@@ -946,7 +957,37 @@ def load_gl_descriptions(file_or_path):
         
     return gl_map
 
-def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
+def load_stock_numbers(file_or_path):
+    wb = openpyxl.load_workbook(file_or_path, data_only=True)
+    ws = wb.active
+    stock_by_inv = {}
+    for r in range(1, ws.max_row + 1):
+        c1 = ws.cell(row=r, column=1).value
+        c5 = ws.cell(row=r, column=5).value
+        if c1 and str(c1).strip().startswith('N0') and c5:
+            stk_no = str(c1).strip()
+            inv_no = str(c5).strip()
+            if inv_no:
+                stock_by_inv[inv_no] = stk_no
+    return stock_by_inv
+
+def load_vehicle_costs(file_or_path):
+    wb = openpyxl.load_workbook(file_or_path, data_only=True)
+    ws = wb.active
+    cost_by_stock = {}
+    for r in range(1, ws.max_row + 1):
+        c1 = ws.cell(row=r, column=1).value
+        if c1 and str(c1).strip().startswith('N0'):
+            stk_no = str(c1).strip()
+            cost_val = ws.cell(row=r, column=5).value
+            if cost_val is not None:
+                try:
+                    cost_by_stock[stk_no] = float(cost_val)
+                except (ValueError, TypeError):
+                    pass
+    return cost_by_stock
+
+def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None, user_config=None):
     import copy
     cfg = copy.deepcopy(DEFAULT_SALES_CONFIG)
     if user_config:
@@ -958,6 +999,11 @@ def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
             else:
                 cfg[k] = v
                 
+    if stock_dict is None:
+        stock_dict = {}
+    if cost_dict is None:
+        cost_dict = {}
+        
     rows_to_write = []
     preview_rows = []
     
@@ -965,6 +1011,8 @@ def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
     total_debit_sum = 0.0
     total_credit_sum = 0.0
     total_tax_sum = 0.0
+    total_vehicle_cost = 0.0
+    matched_cost_count = 0
     
     cat_counts = {k: 0 for k in cfg["categories"].keys()}
     cat_values = {k: 0.0 for k in cfg["categories"].keys()}
@@ -1077,7 +1125,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
         ar_gl = main_cat_cfg["ar_gl"]
         ar_dept = main_cat_cfg["ar_dept"]
         
-        # Header Row
+        # Header Record
         header_record = {
             "type": "HEADER",
             "A": inv_no,
@@ -1151,6 +1199,82 @@ def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
             rows_to_write.append(line_record)
             line_num += 1
             
+        # Vehicle Cost Lines (Only for car sales when stock and cost are available)
+        stk_no = stock_dict.get(inv_no)
+        car_cost = cost_dict.get(stk_no, 0.0) if stk_no else 0.0
+        
+        if car_cost > 0:
+            cogs_gl = int(cfg.get("vehicle_cogs_gl", 51111012))
+            cogs_dept = str(cfg.get("vehicle_cogs_dept", "2002"))
+            cogs_tax = cfg.get("vehicle_cogs_tax", "O")
+            cogs_mfg = cfg.get("vehicle_cogs_manufact", "JEEP")
+            cogs_model = cfg.get("vehicle_cogs_model", "JEEP-G6")
+            cogs_sale = cfg.get("vehicle_cogs_saletype", "TRADE")
+            
+            cogs_debit = car_cost if not is_cn else None
+            cogs_credit = None if not is_cn else car_cost
+            
+            # Line COGS (51111012)
+            cogs_record = {
+                "type": "DETAIL",
+                "D": batch_idx,
+                "G": cfg["currency"],
+                "H": line_num,
+                "I": branch,
+                "J": cogs_dept,
+                "K": cogs_gl,
+                "L": None,
+                "M": cogs_debit,
+                "N": cogs_credit,
+                "O": f"{narrative}_{stk_no}"[:75],
+                "Q": cogs_tax,
+                "U": cogs_mfg,
+                "V": cogs_model,
+                "W": cogs_sale
+            }
+            rows_to_write.append(cogs_record)
+            if cogs_debit is not None:
+                total_debit_sum += cogs_debit
+            if cogs_credit is not None:
+                total_credit_sum += cogs_credit
+            line_num += 1
+            
+            # Line Inventory (11511111)
+            inv_gl = int(cfg.get("vehicle_inv_gl", 11511111))
+            inv_dept = str(cfg.get("vehicle_inv_dept", "0000"))
+            inv_tax = cfg.get("vehicle_inv_tax", "O")
+            inv_mfg = cfg.get("vehicle_inv_manufact", "JEEP")
+            inv_model = cfg.get("vehicle_inv_model", "JEEP-G6")
+            
+            inv_debit = car_cost if is_cn else None
+            inv_credit = None if is_cn else car_cost
+            
+            inv_record = {
+                "type": "DETAIL",
+                "D": batch_idx,
+                "G": cfg["currency"],
+                "H": line_num,
+                "I": branch,
+                "J": inv_dept,
+                "K": inv_gl,
+                "L": None,
+                "M": inv_debit,
+                "N": inv_credit,
+                "O": f"{narrative}_{stk_no}"[:75],
+                "Q": inv_tax,
+                "U": inv_mfg,
+                "V": inv_model
+            }
+            rows_to_write.append(inv_record)
+            if inv_debit is not None:
+                total_debit_sum += inv_debit
+            if inv_credit is not None:
+                total_credit_sum += inv_credit
+            line_num += 1
+            
+            matched_cost_count += 1
+            total_vehicle_cost += car_cost
+            
         rows_to_write.append({"type": "BLANK"})
         
         total_tax_sum += abs_tax
@@ -1173,7 +1297,9 @@ def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
             "Net": abs_net if not is_cn else -abs_net,
             "VAT": abs_tax if not is_cn else -abs_tax,
             "Gross": abs_gross if not is_cn else -abs_gross,
-            "Items": len(itemized_lines)
+            "Stock No": stk_no or "",
+            "Vehicle Cost": car_cost if car_cost > 0 else 0.0,
+            "Items": len(itemized_lines) + (2 if car_cost > 0 else 0)
         })
         
         batch_idx += 1
@@ -1181,9 +1307,11 @@ def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
     summary_stats = {
         "total_invoices": len(df_vat),
         "total_batches": batch_idx - 1,
-        "total_debit": total_debit_sum,
-        "total_credit": total_credit_sum,
-        "total_tax": total_tax_sum,
+        "total_debit": round(total_debit_sum, 2),
+        "total_credit": round(total_credit_sum, 2),
+        "total_tax": round(total_tax_sum, 2),
+        "total_vehicle_cost": round(total_vehicle_cost, 2),
+        "matched_cost_count": matched_cost_count,
         "unmatched_gl_count": unmatched_gl_count,
         "category_counts": {cfg["categories"][k]["name"]: cat_counts[k] for k in cat_counts},
         "category_values": {cfg["categories"][k]["name"]: cat_values[k] for k in cat_values}
@@ -1334,27 +1462,51 @@ with tab_sales:
     col_s1, col_s2 = st.columns(2)
     with col_s1:
         st.subheader("1. อัปโหลดรายงานภาษีขาย (Sales VAT Report)")
-        st.caption("ไฟล์รายงานภาษีขายประจำงวด (เช่น 2026VatReport.xlsx)")
+        st.caption("ไฟล์รายงานภาษีขายประจำงวด (เช่น 2026VatReport.xlsx) *จำเป็น")
         vat_file = st.file_uploader("เลือกไฟล์รายงานภาษีขาย (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_vat_upload")
+        
+        st.subheader("3. อัปโหลดรายงานเลขสต๊อกรถ (Stock Number Report)")
+        st.caption("ไฟล์จับคู่เลขสต๊อกและบิลขาย (เช่น StockNumber2026.xlsx) *ทางเลือก")
+        stock_file = st.file_uploader("เลือกไฟล์เลขสต๊อกรถ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_stock_upload")
         
     with col_s2:
         st.subheader("2. อัปโหลดรายงานบัญชีแยกประเภท (GL Report)")
-        st.caption("ไฟล์บัญชีแยกประเภทสำหรับแยกหมวดเงินจอง/ป้ายแดง/ค่าจด/อุปกรณ์/คอม (เช่น บัญชีแยกประเภท2026.xlsx)")
+        st.caption("ไฟล์บัญชีแยกประเภทสำหรับแยกหมวดเงินจอง/ป้ายแดง/ค่าจด/อุปกรณ์/คอม (เช่น บัญชีแยกประเภท2026.xlsx) *จำเป็น")
         gl_file = st.file_uploader("เลือกไฟล์บัญชีแยกประเภท (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_gl_upload")
+        
+        st.subheader("4. อัปโหลดรายงานต้นทุนรถ (Vehicle Cost Report)")
+        st.caption("ไฟล์ราคาทุนรถยนต์ก่อน VAT (เช่น VehicleCost2026.xlsx) *ทางเลือก")
+        cost_file = st.file_uploader("เลือกไฟล์ต้นทุนรถยนต์ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_cost_upload")
         
     # Optional Config Expander
     with st.expander("⚙️ ตั้งค่า Fixed Values สำหรับฝ่ายขาย (Sales Settings)", expanded=False):
         cfg_col1, cfg_col2, cfg_col3 = st.columns(3)
         with cfg_col1:
             sales_subacc_default = st.text_input("Subaccount ลูกค้าทั่วไป (Default)", value="X0003")
+            veh_cogs_gl = st.text_input("GL Code ต้นทุนรถ (Vehicle COGS)", value="51111012")
+            veh_inv_gl = st.text_input("GL Code สินค้าคงเหลือ (Inventory)", value="11511111")
         with cfg_col2:
             sales_subacc_finance = st.text_input("Subaccount สถาบันการเงิน (Finance)", value="ARCODE FINANCE")
+            veh_cogs_dept = st.text_input("Department ต้นทุนรถ", value="2002")
+            veh_inv_dept = st.text_input("Department สินค้าคงเหลือ", value="0000")
         with cfg_col3:
             sales_dept = st.text_input("รหัสแผนกฝ่ายขาย (Sales Department)", value="2002")
+            veh_mfg = st.text_input("MANUFACT (ยี่ห้อ)", value="JEEP")
+            veh_model = st.text_input("MODEL (รุ่น)", value="JEEP-G6")
+            veh_saletype = st.text_input("SALETYPE (ประเภทการขาย)", value="TRADE")
             
     sales_config_override = {
         "subaccount_default": sales_subacc_default,
-        "subaccount_finance": sales_subacc_finance
+        "subaccount_finance": sales_subacc_finance,
+        "vehicle_cogs_gl": int(veh_cogs_gl) if str(veh_cogs_gl).isdigit() else 51111012,
+        "vehicle_cogs_dept": veh_cogs_dept,
+        "vehicle_cogs_manufact": veh_mfg,
+        "vehicle_cogs_model": veh_model,
+        "vehicle_cogs_saletype": veh_saletype,
+        "vehicle_inv_gl": int(veh_inv_gl) if str(veh_inv_gl).isdigit() else 11511111,
+        "vehicle_inv_dept": veh_inv_dept,
+        "vehicle_inv_manufact": veh_mfg,
+        "vehicle_inv_model": veh_model,
     }
     # Update category configs if changed
     sales_config_override["categories"] = {
@@ -1372,8 +1524,15 @@ with tab_sales:
             with st.spinner("กำลังประมวลผลข้อมูลฝ่ายขายและจัดหมวดหมู่ทางบัญชี..."):
                 df_vat_sales = load_sales_vat_report(vat_file)
                 gl_dict_sales = load_gl_descriptions(gl_file)
+                stock_dict_sales = load_stock_numbers(stock_file) if stock_file else {}
+                cost_dict_sales = load_vehicle_costs(cost_file) if cost_file else {}
+                
                 rows_sales, stats_sales, preview_sales = transform_sales_to_autoline(
-                    df_vat_sales, gl_dict_sales, user_config=sales_config_override
+                    df_vat_sales,
+                    gl_dict_sales,
+                    stock_dict=stock_dict_sales,
+                    cost_dict=cost_dict_sales,
+                    user_config=sales_config_override
                 )
                 
             st.success("✅ แปลงข้อมูลฝ่ายขายสำเร็จเรียบร้อย!")
@@ -1383,7 +1542,9 @@ with tab_sales:
             skpi1, skpi2, skpi3, skpi4 = st.columns(4)
             skpi1.metric("จำนวนบิลที่แปลง (Invoices)", f"{stats_sales['total_invoices']:,} ฉบับ")
             skpi2.metric("จำนวนรายการบัญชี (Lines)", f"{len(rows_sales):,} บรรทัด")
-            skpi3.metric("ยอดรวมเดบิต (Total Debit)", f"{stats_sales['total_debit']:,.2f} ฿")
+            
+            cogs_delta = f"ต้นทุนรถ {stats_sales['total_vehicle_cost']:,.2f} ฿ ({stats_sales['matched_cost_count']} คัน)" if stats_sales['matched_cost_count'] > 0 else None
+            skpi3.metric("ยอดรวมเดบิต (Total Debit)", f"{stats_sales['total_debit']:,.2f} ฿", delta=cogs_delta)
             skpi4.metric("ยอดรวมภาษี (Total Tax)", f"{stats_sales['total_tax']:,.2f} ฿")
             
             # Breakdown by Category
@@ -1400,6 +1561,9 @@ with tab_sales:
             
             if stats_sales.get("unmatched_gl_count", 0) > 0:
                 st.warning(f"⚠️ พบเอกสารกลุ่ม D ที่ไม่พบในบัญชีแยกประเภทจำนวน {stats_sales['unmatched_gl_count']} ฉบับ (ระบบใช้ค่าเริ่มต้นเป็นเงินจอง)")
+
+            if stock_file and cost_file:
+                st.info(f"🚗 ข้อมูลต้นทุนรถ: จับคู่สำเร็จ {stats_sales['matched_cost_count']:,} คัน รวมต้นทุน {stats_sales['total_vehicle_cost']:,.2f} บาท (GL 51111012 / GL 11511111)")
 
             # Download Button for Sales
             st.markdown("---")
@@ -1420,7 +1584,7 @@ with tab_sales:
                 
             # Table Preview for Sales
             st.markdown("### 🔍 ตรวจสอบรายการเอกสาร (Sales Data Preview)")
-            search_sales_kw = st.text_input("ค้นหาเอกสารฝ่ายขาย (เลขที่บิล, ชื่อลูกค้า, หรือหมวดหมู่)", placeholder="เช่น 01WG26020001, 01D26010001, เงินจอง, ธนาคาร, X0003", key="sales_search")
+            search_sales_kw = st.text_input("ค้นหาเอกสารฝ่ายขาย (เลขที่บิล, ชื่อลูกค้า, เลขสต๊อก หรือหมวดหมู่)", placeholder="เช่น 01WG26020001, N001960, 01D26010001, เงินจอง, ธนาคาร, X0003", key="sales_search")
             
             display_sales_df = preview_sales
             if search_sales_kw.strip():
@@ -1429,7 +1593,8 @@ with tab_sales:
                     preview_sales["Invoice"].astype(str).str.lower().str.contains(skw, na=False) |
                     preview_sales["Customer"].astype(str).str.lower().str.contains(skw, na=False) |
                     preview_sales["Category"].astype(str).str.lower().str.contains(skw, na=False) |
-                    preview_sales["Subaccount"].astype(str).str.lower().str.contains(skw, na=False)
+                    preview_sales["Subaccount"].astype(str).str.lower().str.contains(skw, na=False) |
+                    preview_sales["Stock No"].astype(str).str.lower().str.contains(skw, na=False)
                 )
                 display_sales_df = preview_sales[smask]
                 
