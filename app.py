@@ -1004,24 +1004,76 @@ def load_vehicle_costs(file_or_path):
                     pass
     return cost_by_stock
 
-def load_finance_codes(file_or_path):
-    wb = openpyxl.load_workbook(file_or_path, data_only=True)
-    ws = wb.active
-    fin_by_code = {}
-    fin_list = []
-    for r in range(2, ws.max_row + 1):
-        d_pro = str(ws.cell(r, 1).value or '').strip()
-        autoline = str(ws.cell(r, 2).value or '').strip()
-        c_name = str(ws.cell(r, 3).value or '').strip()
-        if autoline:
-            fin_list.append((d_pro, autoline, c_name))
-            if d_pro:
-                fin_by_code[d_pro] = autoline
+DEFAULT_FINANCE_DATA = {
+    "by_code": {
+        "1005": "A0005",
+        "1011": "A0011",
+        "1104": "A0107",
+        "1163": "A0168",
+        "1333": "A0339",
+        "1391": "A0397",
+        "1152": "A0465",
+        "1485": "K0001",
+        "1102": "T0006",
+        "3508": "K0009",
+        "2449": "B0001",
+    },
+    "list": [
+        ("1005", "A0005", "ธนาคารไทยพาณิชย์ จำกัด (มหาชน)"),
+        ("1011", "A0011", "บริษัท ลีสซิ่งกสิกรไทย จำกัด"),
+        ("1104", "A0107", "ธนาคารทหารไทยธนชาต จำกัด (มหาชน)"),
+        ("1163", "A0168", "บริษัท ไทยโอริกซ์ลีสซิ่ง จำกัด (สำนักงานใหญ่)"),
+        ("1333", "A0339", "บริษัท ภัทรลิสซิ่ง จำกัด (มหาชน)"),
+        ("1391", "A0397", "บริษัท เอ็มยูเอฟจี เอฟแอนด์แอล (ประเทศไทย) จำกัด"),
+        ("1152", "A0465", "บริษัท อัลฟ่า เอกซ์ จำกัด (สำนักงานใหญ่)"),
+        ("1485", "K0001", "ธนาคารกรุงศรีอยุธยา จำกัด (มหาชน)"),
+        ("1102", "T0006", "ธนาคารทิสโก้ จำกัด(มหาชน)"),
+        ("3508", "K0009", "บริษัท กรุงเทพแกรนด์แปซิฟิคลีส จำกัด (มหาชน) (สำนักงานใหญ่)"),
+        ("2449", "B0001", "บริษัท บีเอ็มดับเบิลยู ลิสซึ่ง (ประเทศไทย) จำกัด ( สำนักงานใหญ่ )"),
+        ("", "X0003", "บริษัท ซีเจ แคปปิตอล จำกัด"),
+        ("", "X0003", "บริษัท ซูมิ ลิซ ลิสซิ่ง จำกัด"),
+        ("", "X0003", "บริษัท ทีจี แคปปิตอล จํากัด"),
+        ("", "X0003", "บริษัท กรุงไทย มิซูโฮ ลีสซิ่ง จำกัด"),
+        ("", "X0003", "ซีเจ แคปปิตอล"),
+        ("", "X0003", "ทีจี แคปปิตอล"),
+        ("", "X0003", "ซูมิ ลิซ"),
+        ("", "X0003", "มิซูโฮ ลีสซิ่ง"),
+        ("", "X0003", "ซีเจ"),
+        ("", "X0003", "ทีจี"),
+        ("", "X0003", "ซูมิ"),
+        ("", "X0003", "มิซูโฮ"),
+    ]
+}
+
+def load_finance_codes(file_or_path=None):
+    fin_by_code = dict(DEFAULT_FINANCE_DATA["by_code"])
+    fin_list = list(DEFAULT_FINANCE_DATA["list"])
+    if file_or_path:
+        try:
+            wb = openpyxl.load_workbook(file_or_path, data_only=True)
+            ws = wb.active
+            for r in range(2, ws.max_row + 1):
+                d_pro = str(ws.cell(r, 1).value or '').strip()
+                autoline = str(ws.cell(r, 2).value or '').strip()
+                c_name = str(ws.cell(r, 3).value or '').strip()
+                if autoline:
+                    fin_list.append((d_pro, autoline, c_name))
+                    if d_pro:
+                        fin_by_code[d_pro] = autoline
+        except Exception:
+            pass
     return {"by_code": fin_by_code, "list": fin_list}
 
 def resolve_finance_subaccount(inv_no, cust_name, fin_coy_code=None, fin_data=None, default_code="X0003"):
-    if not fin_data:
-        return default_code
+    if fin_data is None:
+        fin_data = DEFAULT_FINANCE_DATA
+        
+    c = str(cust_name or '').strip()
+    
+    # ข้อกำหนดเฉพาะ: บริษัท ซีเจ แคปปิตอล / ทีจี แคปปิตอล และ ซูมิ ลิซ / มิซูโฮ ให้จัดเป็น X0003
+    if any(k in c for k in ["ซีเจ", "ทีจี", "ซูมิ", "มิซูโฮ"]):
+        return "X0003"
+        
     by_code = fin_data.get("by_code", {})
     f_list = fin_data.get("list", [])
     
@@ -1029,15 +1081,21 @@ def resolve_finance_subaccount(inv_no, cust_name, fin_coy_code=None, fin_data=No
     if fin_coy_code and fin_coy_code in by_code:
         return by_code[fin_coy_code]
         
-    c = str(cust_name or '').strip()
     if not c:
         return default_code
         
     # 2. Substring matching with company names
     for d_pro, autoline, f_name in f_list:
-        clean_f = f_name.replace('บริษัท', '').replace('จำกัด', '').replace('(มหาชน)', '').replace('(สำนักงานใหญ่)', '').replace('ธนาคาร', '').strip()
+        clean_f = f_name.replace('บริษัท', '').replace('จำกัด', '').replace('จํากัด', '').replace('(มหาชน)', '').replace('(สำนักงานใหญ่)', '').replace('ธนาคาร', '').strip()
         if clean_f and clean_f in c:
             return autoline
+            
+    # 3. Exact full name match
+    for d_pro, autoline, f_name in f_list:
+        if f_name and f_name in c:
+            return autoline
+            
+    return None
             
 def load_vehicle_gl_cogs(file_or_path):
     import re
@@ -1208,8 +1266,12 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             fin_code = resolve_finance_subaccount(inv_no, cust_name, fin_coy, fin_data, default_code=None)
             
             if fin_code:
-                cat_key = "CAR_SALE_CREDIT"
-                subaccount = fin_code
+                if fin_code == "X0003":
+                    cat_key = "CAR_SALE_CASH"
+                    subaccount = "X0003"
+                else:
+                    cat_key = "CAR_SALE_CREDIT"
+                    subaccount = fin_code
             elif is_finance_customer(cust_name):
                 cat_key = "CAR_SALE_CREDIT"
                 subaccount = cfg.get("subaccount_finance", "ARCODE FINANCE")
@@ -1632,26 +1694,24 @@ with tab_sales:
         st.caption("ไฟล์รายงานภาษีขายประจำงวด (เช่น 2026VatReport.xlsx) *จำเป็น")
         vat_file = st.file_uploader("เลือกไฟล์รายงานภาษีขาย (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_vat_upload")
         
-        st.subheader("3. อัปโหลดบัญชีแยกประเภทรถยนต์ (Vehicle GL Report)")
-        st.caption("ไฟล์บัญชีแยกประเภทหมวดรถยนต์สำหรับต้นทุนและสต๊อก WG & WGCN (เช่น บัญชีแยกประเภท2026(Vehicle).xlsx) *แนะนำ: ไฟล์เดียวครบ")
-        veh_gl_file = st.file_uploader("เลือกไฟล์บัญชีแยกประเภทรถยนต์ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_veh_gl_upload")
-        
     with col_s2:
         st.subheader("2. อัปโหลดรายงานบัญชีแยกประเภท (GL Report)")
         st.caption("ไฟล์บัญชีแยกประเภทสำหรับแยกหมวดเงินจอง/ป้ายแดง/ค่าจด/อุปกรณ์/คอม (เช่น บัญชีแยกประเภท2026.xlsx) *จำเป็น")
         gl_file = st.file_uploader("เลือกไฟล์บัญชีแยกประเภท (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_gl_upload")
         
-        st.subheader("4. อัปโหลดรหัสสถาบันการเงิน (Finance Code Mapping)")
-        st.caption("ไฟล์จับคู่รหัสสถาบันการเงินกับ Autoline (เช่น Finance Code.xlsx) *หากไม่เลือก ระบบจะใช้ไฟล์เริ่มต้นในระบบโดยอัตโนมัติ")
-        fin_file = st.file_uploader("เลือกไฟล์รหัสไฟแนนซ์ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_fin_upload")
+    st.subheader("3. อัปโหลดบัญชีแยกประเภทรถยนต์ (Vehicle GL Report)")
+    st.caption("ไฟล์บัญชีแยกประเภทหมวดรถยนต์สำหรับต้นทุนและสต๊อก WG & WGCN (เช่น บัญชีแยกประเภท2026(Vehicle).xlsx) *แนะนำ: ไฟล์เดียวครบต้นทุนและเลขสต๊อก")
+    veh_gl_file = st.file_uploader("เลือกไฟล์บัญชีแยกประเภทรถยนต์ (.xlsx / .xls)", type=["xlsx", "xls"], key="sales_veh_gl_upload")
         
-    # Optional Legacy Expander
-    with st.expander("📁 ตัวเลือกเสริม: ไฟล์เลขสต๊อกและต้นทุนเดิม (Legacy Stock & Cost Files)", expanded=False):
-        leg_col1, leg_col2 = st.columns(2)
+    # Optional Expander
+    with st.expander("📁 ตัวเลือกเสริมเพิ่มเติม (Optional Files: เลขสต๊อก, ต้นทุน, หรือปรับรหัสไฟแนนซ์)", expanded=False):
+        leg_col1, leg_col2, leg_col3 = st.columns(3)
         with leg_col1:
-            stock_file = st.file_uploader("เลือกไฟล์เลขสต๊อกรถ (StockNumber2026.xlsx)", type=["xlsx", "xls"], key="sales_stock_upload")
+            stock_file = st.file_uploader("ไฟล์เลขสต๊อกรถเดิม (StockNumber2026.xlsx)", type=["xlsx", "xls"], key="sales_stock_upload")
         with leg_col2:
-            cost_file = st.file_uploader("เลือกไฟล์ต้นทุนรถยนต์ (VehicleCost2026.xlsx)", type=["xlsx", "xls"], key="sales_cost_upload")
+            cost_file = st.file_uploader("ไฟล์ต้นทุนรถยนต์เดิม (VehicleCost2026.xlsx)", type=["xlsx", "xls"], key="sales_cost_upload")
+        with leg_col3:
+            fin_file = st.file_uploader("ไฟล์รหัสไฟแนนซ์เพิ่มเติม (หากมีปรับเปลี่ยน)", type=["xlsx", "xls"], key="sales_fin_upload")
         
     # Optional Config Expander
     with st.expander("⚙️ ตั้งค่า Fixed Values สำหรับฝ่ายขาย (Sales Settings)", expanded=False):
@@ -1724,15 +1784,7 @@ with tab_sales:
                 cost_dict_sales = load_vehicle_costs(cost_file) if cost_file else {}
                 
                 fin_data_sales = None
-                if fin_file:
-                    fin_data_sales = load_finance_codes(fin_file)
-                else:
-                    curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
-                    default_fin_path = os.path.join(curr_dir, "Finance Code.xlsx")
-                    if os.path.exists(default_fin_path):
-                        fin_data_sales = load_finance_codes(default_fin_path)
-                    elif os.path.exists("Finance Code.xlsx"):
-                        fin_data_sales = load_finance_codes("Finance Code.xlsx")
+                fin_data_sales = load_finance_codes(fin_file) if fin_file else DEFAULT_FINANCE_DATA
                 
                 rows_sales, stats_sales, preview_sales = transform_sales_to_autoline(
                     df_vat_sales,
