@@ -1,12 +1,6 @@
 import streamlit as st
 import pandas as pd
 import openpyxl
-from src.sales_transformer import (
-    load_sales_vat_report,
-    load_gl_descriptions,
-    transform_sales_to_autoline,
-    DEFAULT_SALES_CONFIG
-)
 import json
 import os
 import sys
@@ -741,6 +735,458 @@ def generate_output_excel(template_path, rows_to_write):
     wb.save(output_stream)
     output_stream.seek(0)
     return output_stream
+
+
+# =============================================================================
+# 3.5. SALES TRANSFORMER (VEHICLE SALES: 0XD / 0XDC / 0XWG / 0XWGCN)
+# =============================================================================
+DEFAULT_SALES_CONFIG = {
+    "subaccount_default": "X0003",
+    "subaccount_finance": "ARCODE FINANCE",
+    "branch_default": "0001",
+    "currency": "THB",
+    "tax_code": "S",
+    "terms": 30,
+    "categories": {
+        "DEPOSIT": {
+            "name": "เงินจองรถยนต์",
+            "ar_gl": "11314001",      # ยอดเงินจองรวม Vat
+            "ar_dept": "0000",
+            "rev_gl": "21931104",     # เงินรับล่วงหน้าค่าจองก่อน Vat
+            "rev_dept": "0000",
+            "subaccount": "X0003"
+        },
+        "RED_PLATE": {
+            "name": "มัดจำป้ายแดง",
+            "ar_gl": "11311001",      # ลูกหนี้การค้า
+            "ar_dept": "0000",
+            "rev_gl": "21931003",     # มัดจำป้ายแดงก่อน Vat
+            "rev_dept": "0000",
+            "subaccount": "X0003"
+        },
+        "REGISTRATION": {
+            "name": "รายได้ค่าจดทะเบียน",
+            "ar_gl": "11311001",      # ลูกหนี้การค้า
+            "ar_dept": "0000",
+            "rev_gl": "49121004",     # รายได้ค่าจด/ค่าดำเนินการก่อน Vat
+            "rev_dept": "2002",
+            "subaccount": "X0003"
+        },
+        "ACCESSORIES": {
+            "name": "รายได้ค่าอุปกรณ์ตกแต่งต่างๆ",
+            "ar_gl": "11311001",      # ลูกหนี้การค้า
+            "ar_dept": "0000",
+            "rev_gl": "41111003",     # รายได้ค่าอุปกรณ์ต่างๆก่อน Vat
+            "rev_dept": "2002",
+            "subaccount": "X0003"
+        },
+        "COMM_FINANCE": {
+            "name": "รายได้ค่าคอมไฟแนนซ์",
+            "ar_gl": "11311001",      # ลูกหนี้การค้า
+            "ar_dept": "0000",
+            "rev_gl": "49121001",     # รายได้ commission finance ก่อน Vat
+            "rev_dept": "2002",
+            "subaccount": "ARCODE FINANCE"
+        },
+        "CAR_SALE_CASH": {
+            "name": "ขายรถยนต์ (ขายสด)",
+            "ar_gl": "11311001",      # ลูกหนี้การค้า
+            "ar_dept": "0000",
+            "rev_gl": "41111001",     # รายได้ขายรถยอดก่อน Vat
+            "rev_dept": "2002",
+            "subaccount": "X0003"
+        },
+        "CAR_SALE_CREDIT": {
+            "name": "ขายรถยนต์ (ขายเชื่อ/ไฟแนนซ์)",
+            "ar_gl": "11311001",      # ลูกหนี้การค้าไฟแนนซ์
+            "ar_dept": "0000",
+            "rev_gl": "41111001",     # รายได้ขายรถยอดก่อน Vat
+            "rev_dept": "2002",
+            "subaccount": "ARCODE FINANCE"
+        }
+    }
+}
+
+FINANCE_KEYWORDS = [
+    'ธนาคาร', 'ลิสซิ่ง', 'ลีสซิ่ง', 'แคปปิตอล', 'ไฟแนนซ์',
+    'bank', 'leasing', 'capital', 'finance', 'auto'
+]
+
+def resolve_sales_branch(invoice_number):
+    inv_str = str(invoice_number or "").strip()
+    if inv_str.startswith("02"):
+        return "0002"
+    return "0001"
+
+def is_finance_customer(customer_name):
+    c_str = str(customer_name or "").lower().strip()
+    return any(k in c_str for k in FINANCE_KEYWORDS)
+
+def classify_description_text(desc):
+    d = str(desc or '').lower().strip()
+    if not d:
+        return 'DEPOSIT'
+        
+    if any(k in d for k in ['ป้ายแดง', 'ป้ายเเดง', 'มัดจำป้าย']):
+        return 'RED_PLATE'
+        
+    if any(k in d for k in ['คอมไฟแนนซ์', 'ค่าคอมไฟแนนซ์', 'คอมมิชชั่นไฟแนนซ์', 'ค่าคอมมิชชั่นไฟแนนซ์', 'comm', 'finan']):
+        return 'COMM_FINANCE'
+        
+    if any(k in d for k in ['จดทะเบียน', 'ค่าจด', 'ค่าดำเนินการ', 'คัดป้าย', 'ป้ายขาว', 'รูดบัตร', 'ธรรมเนียม']):
+        return 'REGISTRATION'
+        
+    if any(k in d for k in ['ฟิล์ม', 'film', 'เคลือบ', 'อุปกรณ์', 'แคมเปญ', 'มัดจำส่วนลด', 'ดาวน์', 'ผ้ายาง', 'กล้อง', 'wall box', 'wallbox', 'ม่าน', 'เบาะ', 'wrap', 'อะไหล่']):
+        return 'ACCESSORIES'
+        
+    if any(k in d for k in ['เงินจอง', 'จองสิทธิ์', 'ลดหนี้เงินจอง', 'หัก เงินจอง', 'จองรถ', 'มัดจำจอง', 'มัดจำ', 'ลดหนี้']):
+        return 'DEPOSIT'
+        
+    if any(k in d for k in ['สินค้ารถ', 'discount', 'รถยนต์', 'ค่างวดแรก', 'วันส่งมอบ']):
+        return 'CAR_SALE_CASH'
+        
+    return 'DEPOSIT'
+
+def load_sales_vat_report(file_or_path):
+    wb = openpyxl.load_workbook(file_or_path, data_only=True)
+    ws = wb.active
+    
+    records = []
+    target_prefixes = ('01D', '02D', '01DC', '02DC', '01WG', '02WG')
+    
+    for r in range(2, ws.max_row + 1):
+        seq = ws.cell(row=r, column=1).value
+        inv = ws.cell(row=r, column=2).value
+        
+        if inv is None or str(seq).strip() in ['รวม', 'Total'] or str(inv).strip() in ['รวม', 'Total']:
+            continue
+            
+        inv_str = str(inv).strip()
+        
+        if not inv_str.startswith(target_prefixes):
+            continue
+            
+        if inv_str.startswith(('HA', 'CA')):
+            continue
+            
+        dt_val = ws.cell(row=r, column=3).value
+        cust_name = str(ws.cell(row=r, column=4).value or '').strip()
+        tax_id = str(ws.cell(row=r, column=5).value or '').strip()
+        
+        net_val = ws.cell(row=r, column=7).value
+        vat_val = ws.cell(row=r, column=8).value
+        gross_val = ws.cell(row=r, column=9).value
+        
+        try:
+            f_net = float(net_val) if net_val is not None else 0.0
+            f_vat = float(vat_val) if vat_val is not None else 0.0
+            f_gross = float(gross_val) if gross_val is not None else 0.0
+        except (ValueError, TypeError):
+            continue
+            
+        if f_net == 0.0 and f_vat == 0.0 and f_gross == 0.0:
+            continue
+            
+        parsed_date = None
+        if dt_val:
+            if isinstance(dt_val, (datetime.date, datetime.datetime)):
+                parsed_date = dt_val
+            else:
+                parts = str(dt_val).strip().split('/')
+                if len(parts) == 3:
+                    try:
+                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                        year = 2000 + y if y < 100 else y
+                        parsed_date = datetime.datetime(year, m, d)
+                    except:
+                        pass
+        if not parsed_date:
+            parsed_date = datetime.datetime.now()
+            
+        records.append({
+            "seq": seq,
+            "invoice_number": inv_str,
+            "doc_date": parsed_date,
+            "doc_date_str": parsed_date.strftime("%d/%m/%y"),
+            "customer_name": cust_name,
+            "tax_id": tax_id,
+            "net_amount": f_net,
+            "vat_amount": f_vat,
+            "gross_amount": f_gross,
+            "is_credit_note": (f_net < 0 or 'DC' in inv_str or 'WGCN' in inv_str)
+        })
+        
+    return pd.DataFrame(records)
+
+def load_gl_descriptions(file_or_path):
+    wb = openpyxl.load_workbook(file_or_path, data_only=True)
+    ws = wb.active
+    
+    gl_map = {}
+    for r in range(3, ws.max_row + 1):
+        doc = ws.cell(row=r, column=10).value
+        if not doc:
+            continue
+        doc_str = str(doc).strip()
+        desc_str = str(ws.cell(row=r, column=12).value or '').strip()
+        cr = ws.cell(row=r, column=9).value
+        dr = ws.cell(row=r, column=8).value
+        
+        f_cr = float(cr) if cr is not None and isinstance(cr, (int, float)) else None
+        f_dr = float(dr) if dr is not None and isinstance(dr, (int, float)) else None
+        
+        if doc_str not in gl_map:
+            gl_map[doc_str] = []
+        gl_map[doc_str].append({
+            "desc": desc_str,
+            "cr": f_cr,
+            "dr": f_dr,
+            "row": r
+        })
+        
+    return gl_map
+
+def transform_sales_to_autoline(df_vat, gl_dict, user_config=None):
+    cfg = DEFAULT_SALES_CONFIG.copy()
+    if user_config:
+        for k, v in user_config.items():
+            if k == "categories" and isinstance(v, dict):
+                cfg["categories"].update(v)
+            else:
+                cfg[k] = v
+                
+    rows_to_write = []
+    preview_rows = []
+    
+    batch_idx = 1
+    total_debit_sum = 0.0
+    total_credit_sum = 0.0
+    total_tax_sum = 0.0
+    
+    cat_counts = {k: 0 for k in cfg["categories"].keys()}
+    cat_values = {k: 0.0 for k in cfg["categories"].keys()}
+    unmatched_gl_count = 0
+    
+    for _, row in df_vat.iterrows():
+        inv_no = row["invoice_number"]
+        doc_date = row["doc_date"]
+        doc_date_str = row["doc_date_str"]
+        cust_name = row["customer_name"]
+        
+        net_val = float(row["net_amount"])
+        vat_val = float(row["vat_amount"])
+        gross_val = float(row["gross_amount"])
+        is_cn = bool(row["is_credit_note"])
+        
+        abs_tax = abs(vat_val)
+        abs_gross = abs(gross_val)
+        abs_net = abs(net_val)
+        
+        branch = resolve_sales_branch(inv_no)
+        narrative = f"{inv_no}_{cust_name}" if cust_name else inv_no
+        if len(narrative) > 75:
+            narrative = narrative[:75]
+            
+        doc_code = "ARC" if is_cn else "ARI"
+        doc_seq = "SCREDITV" if is_cn else "SINVOICV"
+        
+        gl_lines = gl_dict.get(inv_no, [])
+        if not gl_lines and (inv_no.startswith(('01D', '02D', '01DC', '02DC'))):
+            unmatched_gl_count += 1
+            
+        is_wg = inv_no.startswith(('01WG', '02WG'))
+        itemized_lines = []
+        
+        if is_wg:
+            if is_finance_customer(cust_name):
+                cat_key = "CAR_SALE_CREDIT"
+            else:
+                cat_key = "CAR_SALE_CASH"
+            cat_cfg = cfg["categories"][cat_key]
+            subaccount = cat_cfg["subaccount"]
+            
+            itemized_lines.append({
+                "category": cat_key,
+                "gl": cat_cfg["rev_gl"],
+                "dept": cat_cfg["rev_dept"],
+                "net_amount": abs_net,
+                "line_narrative": narrative
+            })
+            
+        else:
+            if len(gl_lines) > 1:
+                total_gl_tax = sum(abs(l["cr"] or l["dr"] or 0.0) for l in gl_lines)
+                if total_gl_tax > 0:
+                    allocated_net = 0.0
+                    for idx_l, gl_l in enumerate(gl_lines):
+                        l_desc = gl_l["desc"]
+                        l_tax = abs(gl_l["cr"] or gl_l["dr"] or 0.0)
+                        l_cat = classify_description_text(l_desc)
+                        l_cat_cfg = cfg["categories"].get(l_cat, cfg["categories"]["DEPOSIT"])
+                        
+                        if idx_l == len(gl_lines) - 1:
+                            l_net = round(abs_net - allocated_net, 2)
+                        else:
+                            l_net = round(abs_net * (l_tax / total_gl_tax), 2)
+                            allocated_net += l_net
+                            
+                        itemized_lines.append({
+                            "category": l_cat,
+                            "gl": l_cat_cfg["rev_gl"],
+                            "dept": l_cat_cfg["rev_dept"],
+                            "net_amount": l_net,
+                            "line_narrative": f"{inv_no}_{l_desc}"[:75]
+                        })
+                else:
+                    primary_cat = classify_description_text(gl_lines[0]["desc"])
+                    cat_cfg = cfg["categories"].get(primary_cat, cfg["categories"]["DEPOSIT"])
+                    itemized_lines.append({
+                        "category": primary_cat,
+                        "gl": cat_cfg["rev_gl"],
+                        "dept": cat_cfg["rev_dept"],
+                        "net_amount": abs_net,
+                        "line_narrative": narrative
+                    })
+            else:
+                primary_desc = gl_lines[0]["desc"] if gl_lines else ""
+                cat_key = classify_description_text(primary_desc)
+                cat_cfg = cfg["categories"].get(cat_key, cfg["categories"]["DEPOSIT"])
+                itemized_lines.append({
+                    "category": cat_key,
+                    "gl": cat_cfg["rev_gl"],
+                    "dept": cat_cfg["rev_dept"],
+                    "net_amount": abs_net,
+                    "line_narrative": narrative
+                })
+                
+            primary_cat_key = itemized_lines[0]["category"]
+            cat_cfg = cfg["categories"].get(primary_cat_key, cfg["categories"]["DEPOSIT"])
+            subaccount = cat_cfg["subaccount"]
+            
+        for itm in itemized_lines:
+            c_key = itm["category"]
+            if c_key in cat_counts:
+                cat_counts[c_key] += 1
+                cat_values[c_key] += itm["net_amount"]
+                
+        main_cat_key = itemized_lines[0]["category"]
+        main_cat_cfg = cfg["categories"].get(main_cat_key, cfg["categories"]["DEPOSIT"])
+        ar_gl = main_cat_cfg["ar_gl"]
+        ar_dept = main_cat_cfg["ar_dept"]
+        
+        # Header Row
+        header_record = {
+            "type": "HEADER",
+            "A": inv_no,
+            "B": inv_no,
+            "C": 1,
+            "D": batch_idx,
+            "E": None,
+            "F": doc_code,
+            "G": cfg["currency"],
+            "H": doc_seq,
+            "I": abs_tax,
+            "J": abs_gross,
+            "K": doc_date,
+            "L": None,
+            "M": inv_no,
+            "N": narrative,
+            "O": doc_date_str,
+            "P": subaccount,
+            "Q": None,
+            "R": None,
+            "S": None,
+            "T": None,
+            "U": "U",
+            "V": None,
+            "W": int(cfg.get("terms", 30)),
+            "X": branch,
+            "Y": None
+        }
+        rows_to_write.append(header_record)
+        
+        # Line 1: AR / Bank Line
+        line1_debit = abs_gross if not is_cn else None
+        line1_credit = abs_gross if is_cn else None
+        
+        line1_record = {
+            "type": "DETAIL",
+            "D": batch_idx,
+            "G": cfg["currency"],
+            "H": 1,
+            "I": branch,
+            "J": ar_dept,
+            "K": ar_gl,
+            "L": None,
+            "M": line1_debit,
+            "N": line1_credit,
+            "O": narrative
+        }
+        rows_to_write.append(line1_record)
+        
+        # Line 2+: Revenue / Liability Lines
+        line_num = 2
+        for itm in itemized_lines:
+            itm_net = itm["net_amount"]
+            itm_debit = itm_net if is_cn else None
+            itm_credit = itm_net if not is_cn else None
+            
+            line_record = {
+                "type": "DETAIL",
+                "D": batch_idx,
+                "G": cfg["currency"],
+                "H": line_num,
+                "I": branch,
+                "J": itm["dept"],
+                "K": itm["gl"],
+                "L": None,
+                "M": itm_debit,
+                "N": itm_credit,
+                "O": itm["line_narrative"],
+                "Q": cfg["tax_code"]
+            }
+            rows_to_write.append(line_record)
+            line_num += 1
+            
+        rows_to_write.append({"type": "BLANK"})
+        
+        total_tax_sum += abs_tax
+        if not is_cn:
+            total_debit_sum += abs_gross
+            total_credit_sum += abs_net
+        else:
+            total_credit_sum += abs_gross
+            total_debit_sum += abs_net
+            
+        preview_rows.append({
+            "Batch": batch_idx,
+            "Invoice": inv_no,
+            "Type": doc_code,
+            "Date": doc_date_str,
+            "Branch": branch,
+            "Category": main_cat_cfg["name"],
+            "Customer": cust_name,
+            "Subaccount": subaccount,
+            "Net": abs_net if not is_cn else -abs_net,
+            "VAT": abs_tax if not is_cn else -abs_tax,
+            "Gross": abs_gross if not is_cn else -abs_gross,
+            "Items": len(itemized_lines)
+        })
+        
+        batch_idx += 1
+        
+    summary_stats = {
+        "total_invoices": len(df_vat),
+        "total_batches": batch_idx - 1,
+        "total_debit": total_debit_sum,
+        "total_credit": total_credit_sum,
+        "total_tax": total_tax_sum,
+        "unmatched_gl_count": unmatched_gl_count,
+        "category_counts": {cfg["categories"][k]["name"]: cat_counts[k] for k in cat_counts},
+        "category_values": {cfg["categories"][k]["name"]: cat_values[k] for k in cat_values}
+    }
+    
+    return rows_to_write, summary_stats, pd.DataFrame(preview_rows)
 
 # =============================================================================
 # 4. STREAMLIT USER INTERFACE (MINIMALIST & ULTRA CLEAN)
