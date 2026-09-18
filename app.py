@@ -60,16 +60,9 @@ AUTOMATED_CONFIG = {
 def resolve_branch(h_row=None, invoice_number=None):
     """
     BRANCH Mapping Rule:
-    - ถ้าเป็น dealer_prefix == 'KSN' หรือ branch_name == 'KasetNawamin' -> '0002'
-    - หรือถ้า invoice_number ขึ้นต้นด้วย '02' -> '0002'
-    - นอกเหนือจากนี้ -> '0001'
+    - สาขา 02 (KSN / KasetNawamin หรือ invoice ขึ้นต้นด้วย '02') -> '0002'
+    - สาขา 01, 03, 04, 05 หรืออื่นๆ -> '0001'
     """
-    if h_row is not None:
-        pfx = str(h_row.get("dealer_prefix", "")).strip().upper()
-        b_name = str(h_row.get("branch_name", "")).strip().lower()
-        if pfx == "KSN" or "kasetnawamin" in b_name:
-            return "0002"
-            
     inv_str = ""
     if invoice_number:
         inv_str = str(invoice_number).strip()
@@ -78,7 +71,15 @@ def resolve_branch(h_row=None, invoice_number=None):
         
     if inv_str.startswith("02"):
         return "0002"
-        
+    if inv_str.startswith(("01", "03", "04", "05")):
+        return "0001"
+
+    if h_row is not None:
+        pfx = str(h_row.get("dealer_prefix", "")).strip().upper()
+        b_name = str(h_row.get("branch_name", "")).strip().lower()
+        if pfx == "KSN" or "kasetnawamin" in b_name or "02" in pfx:
+            return "0002"
+            
     return "0001"
 
 def resolve_branch_by_invoice(invoice_number):
@@ -826,8 +827,72 @@ def transform_to_autoline_data(df_header, df_detail):
         "difference": round(abs((total_debit_sum - total_credit_sum) - (inv_tax - cn_tax)), 2)
     }
     
+    summary_stats["by_branch"] = split_rows_by_branch(rows_to_write)
     preview_df = pd.DataFrame(preview_records)
     return rows_to_write, summary_stats, preview_df
+
+def split_rows_by_branch(rows_to_write):
+    """
+    แยกรายการแถว Autoline ตามรหัสสาขา Autoline (Col X ของ HEADER หรือ Col I ของ ITEM):
+    - Branch 0001: สาขา 01, 03, 04, 05
+    - Branch 0002: สาขา 02
+    พร้อมรันเลข Batch Number (Col D) ใหม่ตั้งแต่ 1..N สำหรับแต่ละไฟล์สาขา
+    """
+    doc_blocks = []
+    current_block = []
+    current_branch = "0001"
+    
+    for row in rows_to_write:
+        if row.get("type") == "HEADER":
+            if current_block:
+                doc_blocks.append((current_branch, current_block))
+                current_block = []
+            current_branch = str(row.get("X", "0001")).strip()
+            current_block.append(row)
+        elif current_block:
+            current_block.append(row)
+            
+    if current_block:
+        doc_blocks.append((current_branch, current_block))
+        
+    branch_0001_rows = []
+    branch_0002_rows = []
+    b1_idx = 1
+    b2_idx = 1
+    
+    for branch, block in doc_blocks:
+        is_b1 = (branch != "0002")
+        target_list = branch_0001_rows if is_b1 else branch_0002_rows
+        target_idx = b1_idx if is_b1 else b2_idx
+        
+        for r in block:
+            r_copy = dict(r)
+            if r_copy.get("type") in ("HEADER", "ITEM"):
+                r_copy["D"] = target_idx
+            target_list.append(r_copy)
+            
+        if is_b1:
+            b1_idx += 1
+        else:
+            b2_idx += 1
+            
+    if branch_0001_rows and branch_0001_rows[-1].get("type") == "BLANK":
+        branch_0001_rows.pop()
+    if branch_0002_rows and branch_0002_rows[-1].get("type") == "BLANK":
+        branch_0002_rows.pop()
+        
+    return {
+        "0001": {
+            "branch": "0001",
+            "rows": branch_0001_rows,
+            "total_documents": b1_idx - 1
+        },
+        "0002": {
+            "branch": "0002",
+            "rows": branch_0002_rows,
+            "total_documents": b2_idx - 1
+        }
+    }
 
 def generate_output_excel(template_path, rows_to_write):
     wb = get_base_autoline_workbook(template_path)
@@ -2459,38 +2524,109 @@ with tab_aftersales:
                 else:
                     kpi6.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
 
-                # Download Button
+                # Download Section (รองรับดาวน์โหลดแยกตามสาขา Autoline: 0001 และ 0002)
                 st.markdown("---")
-                col_dl1, col_dl2 = st.columns([2, 1])
+                st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (แยกตามสาขา)")
+                st.caption("โครงสร้าง Autoline AR/AP (ARI / ARC) แบ่งตามสาขาใน Autoline: สาขา 01, 03, 04, 05 เข้า **Branch 0001** และ สาขา 02 เข้า **Branch 0002**")
+
+                by_branch = summary_stats.get("by_branch", {})
+                now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                b1_data = by_branch.get("0001", {"rows": [], "total_documents": 0})
+                b2_data = by_branch.get("0002", {"rows": [], "total_documents": 0})
+                b1_count = b1_data["total_documents"]
+                b2_count = b2_data["total_documents"]
+
+                col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
+                
+                excel_b1 = None
+                excel_b2 = None
+                
                 with col_dl1:
-                    st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline")
-                    st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR/AP (รองรับทั้งบิล ARI และใบลดหนี้ ARC พร้อมเว้นบรรทัดตามมาตรฐาน)")
+                    if b1_count > 0:
+                        excel_b1 = generate_output_excel(template_path, b1_data["rows"])
+                        st.download_button(
+                            label=f"🏢 Branch 0001 ({b1_count:,} ใบ)\n(สาขา 01, 03, 04, 05)",
+                            data=excel_b1,
+                            file_name=f"Autoline_Import_AFTERSALE_BRANCH0001_{now_str}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_af_b1",
+                            use_container_width=True
+                        )
+                    else:
+                        st.button("🏢 Branch 0001 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_af_b1")
+
                 with col_dl2:
-                    excel_output = generate_output_excel(template_path, rows_to_write)
-                    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    if b2_count > 0:
+                        excel_b2 = generate_output_excel(template_path, b2_data["rows"])
+                        st.download_button(
+                            label=f"🏢 Branch 0002 ({b2_count:,} ใบ)\n(สาขา 02 - เกษตรนวมินทร์)",
+                            data=excel_b2,
+                            file_name=f"Autoline_Import_AFTERSALE_BRANCH0002_{now_str}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_af_b2",
+                            use_container_width=True
+                        )
+                    else:
+                        st.button("🏢 Branch 0002 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_af_b2")
+
+                with col_dl3:
+                    excel_all = generate_output_excel(template_path, rows_to_write)
                     st.download_button(
-                        label="⬇️ ดาวน์โหลด Autoline_Import.xlsx",
-                        data=excel_output,
-                        file_name=f"Autoline_Import_{now_str}.xlsx",
+                        label=f"📦 โหลดรวมทุกสาขา ({b1_count + b2_count:,} ใบ)\n(All Combined)",
+                        data=excel_all,
+                        file_name=f"Autoline_Import_AFTERSALE_ALL_{now_str}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_af_all",
+                        use_container_width=True
+                    )
+
+                with col_dl4:
+                    import zipfile
+                    zip_buf = BytesIO()
+                    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                        if excel_b1 is not None:
+                            zf.writestr(f"Autoline_Import_AFTERSALE_BRANCH0001_{now_str}.xlsx", excel_b1.getvalue())
+                        if excel_b2 is not None:
+                            zf.writestr(f"Autoline_Import_AFTERSALE_BRANCH0002_{now_str}.xlsx", excel_b2.getvalue())
+                    zip_buf.seek(0)
+                    st.download_button(
+                        label=f"🗂️ ดาวน์โหลด (ZIP)\n(รวมไฟล์แยก 0001 & 0002)",
+                        data=zip_buf,
+                        file_name=f"Autoline_Import_AFTERSALE_BRANCHES_{now_str}.zip",
+                        mime="application/zip",
+                        key="dl_af_zip",
                         use_container_width=True
                     )
                     
                 # Table Preview
                 st.markdown("### 🔍 ตรวจสอบข้อมูลก่อนดาวน์โหลด (Data Preview)")
-                search_kw = st.text_input("ค้นหาเอกสาร (เลขที่บิล, ใบลดหนี้, เลขที่อ้างอิง, ชื่อลูกค้า หรือ Doc Code)", placeholder="เช่น 01SC26050001, ARC, HA0027, SINVOICV", key="af_search")
+                col_pf1, col_pf2 = st.columns([1, 2])
+                with col_pf1:
+                    branch_filter_opt = st.selectbox(
+                        "กรองตามสาขา Autoline",
+                        ["ทุกสาขา (All)", f"Branch 0001 (สาขา 01, 03, 04, 05: {b1_count:,} ใบ)", f"Branch 0002 (สาขา 02: {b2_count:,} ใบ)"],
+                        key="af_branch_filter"
+                    )
+                with col_pf2:
+                    search_kw = st.text_input("ค้นหาเอกสาร (เลขที่บิล, ใบลดหนี้, เลขที่อ้างอิง, ชื่อลูกค้า หรือ Doc Code)", placeholder="เช่น 01SC26050001, ARC, HA0027, SINVOICV", key="af_search")
                 
                 display_df = preview_df
+                if "Branch 0001" in branch_filter_opt:
+                    display_df = display_df[display_df["Branch"] == "0001"]
+                elif "Branch 0002" in branch_filter_opt:
+                    display_df = display_df[display_df["Branch"] == "0002"]
+
                 if search_kw.strip():
                     kw = search_kw.strip().lower()
                     mask = (
-                        preview_df["Invoice"].astype(str).str.lower().str.contains(kw, na=False) |
-                        preview_df["Narrative"].astype(str).str.lower().str.contains(kw, na=False) |
-                        preview_df["Doc Code"].astype(str).str.lower().str.contains(kw, na=False) |
-                        preview_df["Doc Seq"].astype(str).str.lower().str.contains(kw, na=False) |
-                        preview_df["Row Type"].astype(str).str.lower().str.contains(kw, na=False)
+                        display_df["Invoice"].astype(str).str.lower().str.contains(kw, na=False) |
+                        display_df["Narrative"].astype(str).str.lower().str.contains(kw, na=False) |
+                        display_df["Doc Code"].astype(str).str.lower().str.contains(kw, na=False) |
+                        display_df["Doc Seq"].astype(str).str.lower().str.contains(kw, na=False) |
+                        display_df["Row Type"].astype(str).str.lower().str.contains(kw, na=False)
                     )
-                    display_df = preview_df[mask]
+                    display_df = display_df[mask]
                     
                 st.dataframe(display_df, use_container_width=True, height=450)
                 
