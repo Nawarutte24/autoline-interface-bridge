@@ -1005,7 +1005,7 @@ def transform_parts_sales_to_autoline(invoices_dict, config=None):
         cost_amt = round(abs(raw_cost), 2)
         
         doc_code = "ARC" if is_cn else "ARI"
-        doc_seq = "PCREDITV" if is_cn else "PINVOICV"
+        doc_seq = "SCREDITV" if is_cn else "SINVOICV"
         has_vat = (vat_amt > 0)
         tax_group_val = "U" if has_vat else "OS"
         crcode_val = "00000004" if is_cn else None
