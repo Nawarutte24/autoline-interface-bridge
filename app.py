@@ -84,6 +84,55 @@ def resolve_branch(h_row=None, invoice_number=None):
 def resolve_branch_by_invoice(invoice_number):
     return resolve_branch(invoice_number=invoice_number)
 
+# -----------------------------------------------------------------------------
+# Aftersales Insurance ARCODE Mappings
+# -----------------------------------------------------------------------------
+INSURANCE_ARCODE_MAPPINGS = [
+    ("A0155", ["ทิพยประกันภัย", "ทิพย ประกันภัย", "dhipaya"]),
+    ("A0198", ["กรุงเทพประกันภัย", "กรุงเทพ ประกันภัย", "bangkok insurance"]),
+    ("A0218", ["เอ็ม เอส ไอ จี", "เอ็มเอสไอจี", "msig"]),
+    ("A0228", ["แอกซ่าประกันภัย", "แอกซ่า ประกันภัย", "axa"]),
+    ("C0007", ["ชับบ์สามัคคีประกันภัย", "ชับบ์สามัคคี", "ชับบ์", "chubb"]),
+    ("F0001", ["ฟอลคอนประกันภัย", "ฟอลคอน ประกันภัย", "ฟอลคอน", "falcon"]),
+    ("K0007", ["กรุงไทยพานิชประกันภัย", "กรุงไทยพานิช", "กรุงไทยพาณิช", "kpi"]),
+    ("L0001", ["แอลเอ็มจี ประกันภัย", "แอลเอ็มจีประกันภัย", "แอลเอ็มจี", "lmg"]),
+    ("M0019", ["เมืองไทยประกันภัย", "เมืองไทย ประกันภัย", "muang thai insurance"]),
+]
+
+def resolve_aftersales_subaccount(customer_name, default="X0004"):
+    """
+    จับคู่ชื่อลูกค้าฝั่ง Aftersales กับรหัส ARCODE บัญชีลูกหนี้บริษัทประกันภัย:
+    - A0155: บริษัท ทิพยประกันภัย จำกัด (มหาชน)
+    - A0198: บริษัท กรุงเทพประกันภัย จำกัด (มหาชน)
+    - A0218: บมจ.เอ็ม เอส ไอ จี ประกันภัย (ประเทศไทย)
+    - A0228: บริษัท แอกซ่าประกันภัย จำกัด (มหาชน)
+    - C0007: บริษัท ชับบ์สามัคคีประกันภัย จำกัด (มหาชน)
+    - F0001: บริษัท ฟอลคอนประกันภัย จำกัด (มหาชน)
+    - K0007: บริษัท กรุงไทยพานิชประกันภัย จำกัด(มหาชน)
+    - L0001: บริษัท แอลเอ็มจี ประกันภัย จำกัด (มหาชน)
+    - M0019: บริษัท เมืองไทยประกันภัย จำกัด (มหาชน)
+    - นอกเหนือจากนี้ (ลูกค้ารายย่อยทั่วไป) คืนค่า default (ปกติคือ X0004)
+    """
+    if not customer_name:
+        return default
+    s = str(customer_name).strip().lower()
+    if not s or s == "nan":
+        return default
+        
+    for code, keywords in INSURANCE_ARCODE_MAPPINGS:
+        for kw in keywords:
+            if kw.lower() in s:
+                return code
+                
+    if "ทิพย" in s and "ประกัน" in s:
+        return "A0155"
+    if "กรุงเทพ" in s and "ประกัน" in s and "ชีวิต" not in s:
+        return "A0198"
+    if "เมืองไทย" in s and "ประกัน" in s and "ชีวิต" not in s:
+        return "M0019"
+        
+    return default
+
 # =============================================================================
 # 2. TEMPLATE GENERATOR
 # =============================================================================
@@ -300,7 +349,7 @@ def transform_to_autoline_data(df_header, df_detail):
         misc_ref = "_".join([p for p in parts if p])
         narrative = misc_ref
         
-        subaccount = AUTOMATED_CONFIG["subaccount_default"]
+        subaccount = resolve_aftersales_subaccount(cust_name, default=AUTOMATED_CONFIG.get("subaccount_default", "X0004"))
         terms_val = AUTOMATED_CONFIG["terms"]
         src_branch = resolve_branch(h_row=h_row, invoice_number=inv_no)
         
