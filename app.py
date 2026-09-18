@@ -2032,7 +2032,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             "V": None,
             "W": int(cfg.get("terms", 30)),
             "X": branch,
-            "Y": None
+            "Y": "00000004" if is_cn else None
         }
         add_record(header_record)
         
