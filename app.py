@@ -957,6 +957,8 @@ def load_gl_descriptions(file_or_path):
             "row": r
         })
         
+    return gl_map
+
 def clean_customer_name(name):
     if not name:
         return ""
