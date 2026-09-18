@@ -85,53 +85,124 @@ def resolve_branch_by_invoice(invoice_number):
     return resolve_branch(invoice_number=invoice_number)
 
 # -----------------------------------------------------------------------------
-# Aftersales Insurance ARCODE Mappings
+# UNIFIED CUSTOMER MASTER & ARCODE MAPPINGS (SALE & AFTERSALE)
+# DealerPro Code = Autoline Code = Customer Name (3-Way Mapping)
 # -----------------------------------------------------------------------------
-INSURANCE_ARCODE_MAPPINGS = [
-    ("A0155", ["ทิพยประกันภัย", "ทิพย ประกันภัย", "dhipaya"]),
-    ("A0198", ["กรุงเทพประกันภัย", "กรุงเทพ ประกันภัย", "bangkok insurance"]),
-    ("A0218", ["เอ็ม เอส ไอ จี", "เอ็มเอสไอจี", "msig"]),
-    ("A0228", ["แอกซ่าประกันภัย", "แอกซ่า ประกันภัย", "axa"]),
-    ("C0007", ["ชับบ์สามัคคีประกันภัย", "ชับบ์สามัคคี", "ชับบ์", "chubb"]),
-    ("F0001", ["ฟอลคอนประกันภัย", "ฟอลคอน ประกันภัย", "ฟอลคอน", "falcon"]),
-    ("K0007", ["กรุงไทยพานิชประกันภัย", "กรุงไทยพานิช", "กรุงไทยพาณิช", "kpi"]),
-    ("L0001", ["แอลเอ็มจี ประกันภัย", "แอลเอ็มจีประกันภัย", "แอลเอ็มจี", "lmg"]),
-    ("M0019", ["เมืองไทยประกันภัย", "เมืองไทย ประกันภัย", "muang thai insurance"]),
+UNIFIED_ARCODE_BY_DEALERPRO = {
+    "1005": "A0005",  # ธนาคารไทยพาณิชย์ จำกัด (มหาชน)
+    "1011": "A0011",  # บริษัท ลีสซิ่งกสิกรไทย จำกัด
+    "1104": "A0107",  # ธนาคารทหารไทยธนชาต จำกัด (มหาชน)
+    "1163": "A0168",  # บริษัท ไทยโอริกซ์ลีสซิ่ง จำกัด (สำนักงานใหญ่)
+    "1333": "A0339",  # บริษัท ภัทรลิสซิ่ง จำกัด (มหาชน)
+    "1391": "A0397",  # บริษัท เอ็มยูเอฟจี เอฟแอนด์แอล (ประเทศไทย) จำกัด
+    "1152": "A0465",  # บริษัท อัลฟ่า เอกซ์ จำกัด (สำนักงานใหญ่)
+    "1485": "K0001",  # ธนาคารกรุงศรีอยุธยา จำกัด (มหาชน)
+    "1102": "T0006",  # ธนาคารทิสโก้ จำกัด(มหาชน)
+    "3508": "K0009",  # บริษัท กรุงเทพแกรนด์แปซิฟิคลีส จำกัด (มหาชน) (สำนักงานใหญ่)
+    "2449": "B0001",  # บริษัท บีเอ็มดับเบิลยู ลิสซึ่ง (ประเทศไทย) จำกัด ( สำนักงานใหญ่ )
+    "2470": "X0005",  # บริษัท เอ็กซ์ โมบิลิตี้ พลัส จำกัด
+    "1150": "A0155",  # บริษัท ทิพยประกันภัย จำกัด (มหาชน)
+    "1193": "A0198",  # บริษัท กรุงเทพประกันภัย จำกัด (มหาชน)
+    "1213": "A0218",  # บมจ.เอ็ม เอส ไอ จี ประกันภัย (ประเทศไทย)
+    "1223": "A0228",  # บริษัท แอกซ่าประกันภัย จำกัด (มหาชน)
+    "2835": "C0007",  # บริษัท ชับบ์สามัคคีประกันภัย จำกัด (มหาชน)
+    "1456": "F0001",  # บริษัท ฟอลคอนประกันภัย จำกัด (มหาชน)
+    "1491": "K0007",  # บริษัท กรุงไทยพานิชประกันภัย จำกัด(มหาชน)
+    "1493": "L0001",  # บริษัท แอลเอ็มจี ประกันภัย จำกัด (มหาชน)
+    "1509": "M0019",  # บริษัท เมืองไทยประกันภัย จำกัด (มหาชน)
+    "1625": "M0012",  # บริษัท มาสเตอร์ มอเตอร์ เซอร์วิสเซส (ประเทศไทย) จำกัด
+    "2419": "A0025",  # บริษัท มาสเตอร์ คาร์เร้นเทิล จำกัด
+    "1527": "X0005",  # บริษัท เอ็กซ์ โมบิลิตี้ พลัส จำกัด
+    "1526": "X0006",  # บริษัท เอ็กซ์ โมบิลิตี้ (ประเทศไทย) จำกัด
+}
+
+UNIFIED_CUSTOMER_ENTRIES = [
+    ("A0005", "ธนาคารไทยพาณิชย์ จำกัด (มหาชน)", ["ไทยพาณิชย์", "scb"]),
+    ("A0011", "บริษัท ลีสซิ่งกสิกรไทย จำกัด", ["ลีสซิ่งกสิกรไทย", "กสิกรไทย", "k-leasing", "k leasing"]),
+    ("A0107", "ธนาคารทหารไทยธนชาต จำกัด (มหาชน)", ["ทหารไทยธนชาต", "ttb", "tmb"]),
+    ("A0168", "บริษัท ไทยโอริกซ์ลีสซิ่ง จำกัด (สำนักงานใหญ่)", ["ไทยโอริกซ์", "orix"]),
+    ("A0339", "บริษัท ภัทรลิสซิ่ง จำกัด (มหาชน)", ["ภัทรลิสซิ่ง", "ภัทร ลิสซิ่ง", "phatra leasing", "phatra"]),
+    ("A0397", "บริษัท เอ็มยูเอฟจี เอฟแอนด์แอล (ประเทศไทย) จำกัด", ["เอ็มยูเอฟจี", "mufg"]),
+    ("A0465", "บริษัท อัลฟ่า เอกซ์ จำกัด (สำนักงานใหญ่)", ["อัลฟ่า เอกซ์", "อัลฟ่าเอกซ์", "alpha x", "alpha-x"]),
+    ("K0001", "ธนาคารกรุงศรีอยุธยา จำกัด (มหาชน)", ["กรุงศรีอยุธยา", "กรุงศรี", "krungsri", "bay"]),
+    ("T0006", "ธนาคารทิสโก้ จำกัด(มหาชน)", ["ทิสโก้", "tisco"]),
+    ("K0009", "บริษัท กรุงเทพแกรนด์แปซิฟิคลีส จำกัด (มหาชน) (สำนักงานใหญ่)", ["กรุงเทพแกรนด์แปซิฟิค", "แกรนด์แปซิฟิค", "bgpl"]),
+    ("B0001", "บริษัท บีเอ็มดับเบิลยู ลิสซึ่ง (ประเทศไทย) จำกัด ( สำนักงานใหญ่ )", ["บีเอ็มดับเบิลยู", "bmw"]),
+    ("X0005", "บริษัท เอ็กซ์ โมบิลิตี้ พลัส จำกัด", ["เอ็กซ์ โมบิลิตี้ พลัส", "เอ็กซ์โมบิลิตี้ พลัส", "x mobility plus"]),
+    ("A0155", "บริษัท ทิพยประกันภัย จำกัด (มหาชน)", ["ทิพยประกันภัย", "ทิพย ประกันภัย", "dhipaya"]),
+    ("A0198", "บริษัท กรุงเทพประกันภัย จำกัด (มหาชน)", ["กรุงเทพประกันภัย", "กรุงเทพ ประกันภัย", "bangkok insurance"]),
+    ("A0218", "บมจ.เอ็ม เอส ไอ จี ประกันภัย (ประเทศไทย)", ["เอ็ม เอส ไอ จี", "เอ็มเอสไอจี", "msig"]),
+    ("A0228", "บริษัท แอกซ่าประกันภัย จำกัด (มหาชน)", ["แอกซ่าประกันภัย", "แอกซ่า ประกันภัย", "axa"]),
+    ("C0007", "บริษัท ชับบ์สามัคคีประกันภัย จำกัด (มหาชน)", ["ชับบ์สามัคคีประกันภัย", "ชับบ์สามัคคี", "ชับบ์", "chubb"]),
+    ("F0001", "บริษัท ฟอลคอนประกันภัย จำกัด (มหาชน)", ["ฟอลคอนประกันภัย", "ฟอลคอน ประกันภัย", "falcon"]),
+    ("K0007", "บริษัท กรุงไทยพานิชประกันภัย จำกัด(มหาชน)", ["กรุงไทยพานิชประกันภัย", "กรุงไทยพานิช", "กรุงไทยพาณิช", "kpi"]),
+    ("L0001", "บริษัท แอลเอ็มจี ประกันภัย จำกัด (มหาชน)", ["แอลเอ็มจี ประกันภัย", "แอลเอ็มจีประกันภัย", "lmg"]),
+    ("M0019", "บริษัท เมืองไทยประกันภัย จำกัด (มหาชน)", ["เมืองไทยประกันภัย", "เมืองไทย ประกันภัย", "muang thai insurance"]),
+    ("M0012", "บริษัท มาสเตอร์ มอเตอร์ เซอร์วิสเซส (ประเทศไทย) จำกัด", ["มาสเตอร์ มอเตอร์ เซอร์วิสเซส", "มาสเตอร์ มอเตอร์", "มาสเตอร์ คาร์เร้นเทิล เซอร์วิส", "mms"]),
+    ("A0025", "บริษัท มาสเตอร์ คาร์เร้นเทิล จำกัด", ["มาสเตอร์ คาร์เร้นเทิล", "master car rental"]),
+    ("X0006", "บริษัท เอ็กซ์ โมบิลิตี้ (ประเทศไทย) จำกัด", ["เอ็กซ์ โมบิลิตี้", "เอ็กซ์โมบิลิตี้", "x mobility"]),
 ]
 
-def resolve_aftersales_subaccount(customer_name, default="X0004"):
+def resolve_unified_arcode(dealerpro_code=None, customer_name=None, context="aftersale", default_override=None):
     """
-    จับคู่ชื่อลูกค้าฝั่ง Aftersales กับรหัส ARCODE บัญชีลูกหนี้บริษัทประกันภัย:
-    - A0155: บริษัท ทิพยประกันภัย จำกัด (มหาชน)
-    - A0198: บริษัท กรุงเทพประกันภัย จำกัด (มหาชน)
-    - A0218: บมจ.เอ็ม เอส ไอ จี ประกันภัย (ประเทศไทย)
-    - A0228: บริษัท แอกซ่าประกันภัย จำกัด (มหาชน)
-    - C0007: บริษัท ชับบ์สามัคคีประกันภัย จำกัด (มหาชน)
-    - F0001: บริษัท ฟอลคอนประกันภัย จำกัด (มหาชน)
-    - K0007: บริษัท กรุงไทยพานิชประกันภัย จำกัด(มหาชน)
-    - L0001: บริษัท แอลเอ็มจี ประกันภัย จำกัด (มหาชน)
-    - M0019: บริษัท เมืองไทยประกันภัย จำกัด (มหาชน)
-    - นอกเหนือจากนี้ (ลูกค้ารายย่อยทั่วไป) คืนค่า default (ปกติคือ X0004)
+    จับคู่ ARCODE 3 ทาง (DealerPro Code = Autoline Code = Customer Name):
+    1. ตรวจสอบรหัสจาก DealerPro (ถ้ามีระบุ เช่น customer_code ใน Aftersales หรือ fin_coy ใน Sales)
+    2. ตรวจสอบจากชื่อลูกค้า (Customer Name)
+    3. ค่าเริ่มต้นตามบริบท (Context):
+       - ฝั่ง Sale: ค่าเริ่มต้นเป็น 'X0003' (Vehicle Xpeng)
+       - ฝั่ง Aftersale: ค่าเริ่มต้นเป็น 'X0004' (Service Xpeng)
     """
-    if not customer_name:
-        return default
-    s = str(customer_name).strip().lower()
-    if not s or s == "nan":
-        return default
-        
-    for code, keywords in INSURANCE_ARCODE_MAPPINGS:
-        for kw in keywords:
-            if kw.lower() in s:
-                return code
+    # 1. Match from DealerPro code
+    if dealerpro_code is not None:
+        d_code = str(dealerpro_code).strip().split('.')[0]
+        if d_code in UNIFIED_ARCODE_BY_DEALERPRO:
+            return UNIFIED_ARCODE_BY_DEALERPRO[d_code]
+            
+    # 2. Match from Customer Name
+    c = str(customer_name or "").strip().lower()
+    if c and c != "nan" and c != "none":
+        if any(k in c for k in ["ซีเจ", "ทีจี", "ซูมิ", "มิซูโฮ"]):
+            return "X0003"
+            
+        # Specific disambiguation rules:
+        # X Mobility Plus (X0005) vs X Mobility Thailand (X0006)
+        if ("เอ็กซ์" in c or "x mobility" in c) and ("พลัส" in c or "plus" in c):
+            return "X0005"
+        if "เอ็กซ์ โมบิลิตี้" in c or "เอ็กซ์โมบิลิตี้" in c or "x mobility" in c:
+            return "X0006"
+            
+        # Master Motor Services (M0012) vs Master Car Rental (A0025)
+        if "มาสเตอร์" in c:
+            if "เซอร์วิส" in c or "service" in c or "motor" in c or "mms" in c:
+                return "M0012"
+            if "คาร์เร้นเทิล" in c or "rental" in c:
+                return "A0025"
                 
-    if "ทิพย" in s and "ประกัน" in s:
-        return "A0155"
-    if "กรุงเทพ" in s and "ประกัน" in s and "ชีวิต" not in s:
-        return "A0198"
-    if "เมืองไทย" in s and "ประกัน" in s and "ชีวิต" not in s:
-        return "M0019"
-        
-    return default
+        # Non-life Insurance vs Life Insurance
+        if "ทิพย" in c and "ประกัน" in c:
+            return "A0155"
+        if "กรุงเทพ" in c and "ประกัน" in c and "ชีวิต" not in c:
+            return "A0198"
+        if "เมืองไทย" in c and "ประกัน" in c and "ชีวิต" not in c:
+            return "M0019"
+            
+        for autoline_code, off_name, keywords in UNIFIED_CUSTOMER_ENTRIES:
+            clean_off = off_name.replace("บริษัท", "").replace("จำกัด", "").replace("จํากัด", "").replace("(มหาชน)", "").replace("(สำนักงานใหญ่)", "").replace("( สำนักงานใหญ่ )", "").replace("ธนาคาร", "").strip().lower()
+            if clean_off and clean_off in c:
+                return autoline_code
+            for kw in keywords:
+                if kw.lower() in c:
+                    return autoline_code
+                    
+    # 3. Fallback default by context
+    if default_override is not None:
+        return default_override
+    if context == "sale":
+        return "X0003"
+    return "X0004"
+
+def resolve_aftersales_subaccount(customer_name, dealerpro_code=None, default="X0004"):
+    return resolve_unified_arcode(dealerpro_code=dealerpro_code, customer_name=customer_name, context="aftersale", default_override=default)
 
 # =============================================================================
 # 2. TEMPLATE GENERATOR
@@ -353,7 +424,8 @@ def transform_to_autoline_data(df_header, df_detail):
         misc_ref = "_".join([p for p in parts if p])
         narrative = misc_ref
         
-        subaccount = resolve_aftersales_subaccount(cust_name, default=AUTOMATED_CONFIG.get("subaccount_default", "X0004"))
+        cust_code = str(h_row.get("customer_code", "")).strip()
+        subaccount = resolve_aftersales_subaccount(customer_name=cust_name, dealerpro_code=cust_code, default=AUTOMATED_CONFIG.get("subaccount_default", "X0004"))
         terms_val = AUTOMATED_CONFIG["terms"]
         src_branch = resolve_branch(h_row=h_row, invoice_number=inv_no)
         
@@ -1122,37 +1194,27 @@ def load_finance_codes(file_or_path=None):
     return {"by_code": fin_by_code, "list": fin_list}
 
 def resolve_finance_subaccount(inv_no, cust_name, fin_coy_code=None, fin_data=None, default_code="X0003"):
-    if fin_data is None:
-        fin_data = DEFAULT_FINANCE_DATA
-        
-    c = str(cust_name or '').strip()
-    
-    # ข้อกำหนดเฉพาะ: บริษัท ซีเจ แคปปิตอล / ทีจี แคปปิตอล และ ซูมิ ลิซ / มิซูโฮ ให้จัดเป็น X0003
-    if any(k in c for k in ["ซีเจ", "ทีจี", "ซูมิ", "มิซูโฮ"]):
-        return "X0003"
-        
-    by_code = fin_data.get("by_code", {})
-    f_list = fin_data.get("list", [])
-    
-    # 1. Match from fin_coy (Dealer pro code from Stock file)
-    if fin_coy_code and fin_coy_code in by_code:
-        return by_code[fin_coy_code]
-        
-    if not c:
-        return default_code
-        
-    # 2. Substring matching with company names
-    for d_pro, autoline, f_name in f_list:
-        clean_f = f_name.replace('บริษัท', '').replace('จำกัด', '').replace('จํากัด', '').replace('(มหาชน)', '').replace('(สำนักงานใหญ่)', '').replace('ธนาคาร', '').strip()
-        if clean_f and clean_f in c:
-            return autoline
-            
-    # 3. Exact full name match
-    for d_pro, autoline, f_name in f_list:
-        if f_name and f_name in c:
-            return autoline
-            
-    return None
+    # If custom fin_data was uploaded and differs from default, check it first
+    if fin_data and fin_data != DEFAULT_FINANCE_DATA:
+        by_code = fin_data.get("by_code", {})
+        f_list = fin_data.get("list", [])
+        if fin_coy_code and str(fin_coy_code).strip() in by_code:
+            return by_code[str(fin_coy_code).strip()]
+        c = str(cust_name or '').strip()
+        if c:
+            for d_pro, autoline, f_name in f_list:
+                clean_f = f_name.replace('บริษัท', '').replace('จำกัด', '').replace('จํากัด', '').replace('(มหาชน)', '').replace('(สำนักงานใหญ่)', '').replace('ธนาคาร', '').strip()
+                if clean_f and clean_f in c:
+                    return autoline
+            for d_pro, autoline, f_name in f_list:
+                if f_name and f_name in c:
+                    return autoline
+                    
+    # Unified 3-way resolution (DealerPro Code = Autoline Code = Customer Name)
+    matched = resolve_unified_arcode(dealerpro_code=fin_coy_code, customer_name=cust_name, context="sale", default_override=None)
+    if matched:
+        return matched
+    return default_code
             
 def load_vehicle_gl_cogs(file_or_path):
     import re
@@ -1493,6 +1555,10 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 fin_code = resolve_finance_subaccount(inv_no, cust_name, "", fin_data, default_code=None)
                 if fin_code:
                     subaccount = fin_code
+            else:
+                matched_corp = resolve_unified_arcode(dealerpro_code=None, customer_name=cust_name, context="sale", default_override=None)
+                if matched_corp and matched_corp != "X0003":
+                    subaccount = matched_corp
             
         main_cat = itemized_lines[0]["category"]
         main_cat_cfg = cfg["categories"].get(main_cat, cfg["categories"]["DEPOSIT"])
