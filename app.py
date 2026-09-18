@@ -162,6 +162,9 @@ def resolve_unified_arcode(dealerpro_code=None, customer_name=None, context="aft
     # 2. Match from Customer Name
     c = str(customer_name or "").strip().lower()
     if c and c != "nan" and c != "none":
+        if "มัดจำอะไหล่" in c or ("มัดจำ" in c and "อะไหล่" in c) or "parts deposit" in c:
+            return "D0001"
+            
         if any(k in c for k in ["ซีเจ", "ทีจี", "ซูมิ", "มิซูโฮ"]):
             return "X0003"
             
@@ -1319,6 +1322,22 @@ DEFAULT_SALES_CONFIG = {
             "rev_dept": "2002",
             "subaccount": "X0003"
         },
+        "FEE": {
+            "name": "รายได้ค่าธรรมเนียม",
+            "ar_gl": "11311001",      # ลูกหนี้การค้า
+            "ar_dept": "0000",
+            "rev_gl": "49291009",     # ค่าธรรมเนียม
+            "rev_dept": "2002",
+            "subaccount": "X0003"
+        },
+        "PARTS_DEPOSIT": {
+            "name": "มัดจำอะไหล่",
+            "ar_gl": "11311001",      # ลูกหนี้การค้า
+            "ar_dept": "0000",
+            "rev_gl": "21931004",     # มัดจำอะไหล่
+            "rev_dept": "0000",
+            "subaccount": "D0001"
+        },
         "COMM_FINANCE": {
             "name": "รายได้ค่าคอมไฟแนนซ์",
             "ar_gl": "11311001",      # ลูกหนี้การค้า
@@ -1368,13 +1387,19 @@ def classify_description_text(desc):
     if not d:
         return 'DEPOSIT'
         
+    if 'มัดจำอะไหล่' in d or ('มัดจำ' in d and 'อะไหล่' in d) or 'parts deposit' in d:
+        return 'PARTS_DEPOSIT'
+        
+    if any(k in d for k in ['ค่าธรรมเนียม', 'ธรรมเนียม', 'fee']):
+        return 'FEE'
+        
     if any(k in d for k in ['ป้ายแดง', 'ป้ายเเดง', 'มัดจำป้าย']):
         return 'RED_PLATE'
         
     if any(k in d for k in ['คอมไฟแนนซ์', 'ค่าคอมไฟแนนซ์', 'คอมมิชชั่นไฟแนนซ์', 'ค่าคอมมิชชั่นไฟแนนซ์', 'comm', 'finan']):
         return 'COMM_FINANCE'
         
-    if any(k in d for k in ['จดทะเบียน', 'ค่าจด', 'ค่าดำเนินการ', 'คัดป้าย', 'ป้ายขาว', 'รูดบัตร', 'ธรรมเนียม']):
+    if any(k in d for k in ['จดทะเบียน', 'ค่าจด', 'ค่าดำเนินการ', 'คัดป้าย', 'ป้ายขาว', 'รูดบัตร']):
         return 'REGISTRATION'
         
     if any(k in d for k in ['ฟิล์ม', 'film', 'เคลือบ', 'อุปกรณ์', 'แคมเปญ', 'มัดจำส่วนลด', 'ดาวน์', 'ผ้ายาง', 'กล้อง', 'wall box', 'wallbox', 'ม่าน', 'เบาะ', 'wrap', 'อะไหล่']):
@@ -1931,7 +1956,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             
         else:
             # 0XD / 0XDC: Consolidate to 2 lines per invoice (Line 1 Dr AR, Line 2 Cr Category GL)
-            cat_priority = ['COMM_FINANCE', 'REGISTRATION', 'ACCESSORIES', 'RED_PLATE', 'DEPOSIT']
+            cat_priority = ['PARTS_DEPOSIT', 'FEE', 'COMM_FINANCE', 'REGISTRATION', 'ACCESSORIES', 'RED_PLATE', 'DEPOSIT']
             main_cat = 'DEPOSIT'
             if gl_lines:
                 found_cats = set()
@@ -1943,6 +1968,10 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                     if p in found_cats:
                         main_cat = p
                         break
+            else:
+                c_cat = classify_description_text(cust_name)
+                if c_cat in ['PARTS_DEPOSIT', 'FEE', 'COMM_FINANCE', 'REGISTRATION', 'ACCESSORIES', 'RED_PLATE']:
+                    main_cat = c_cat
                         
             main_cat_cfg = cfg["categories"].get(main_cat, cfg["categories"]["DEPOSIT"])
             itemized_lines.append({
@@ -1953,12 +1982,16 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 "line_narrative": narrative
             })
             
-            subaccount = main_cat_cfg["subaccount"]
-            if main_cat == "COMM_FINANCE":
+            if main_cat == "PARTS_DEPOSIT":
+                subaccount = "D0001"
+            elif main_cat == "COMM_FINANCE":
                 fin_code = resolve_finance_subaccount(inv_no, cust_name, "", fin_data, default_code=None)
                 if fin_code:
                     subaccount = fin_code
+                else:
+                    subaccount = main_cat_cfg["subaccount"]
             else:
+                subaccount = main_cat_cfg["subaccount"]
                 matched_corp = resolve_unified_arcode(dealerpro_code=None, customer_name=cust_name, context="sale", default_override=None)
                 if matched_corp and matched_corp != "X0003":
                     subaccount = matched_corp
