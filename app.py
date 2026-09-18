@@ -229,11 +229,15 @@ def load_and_validate_inputs(header_file, detail_file):
     if "invoice_number" not in df_detail.columns:
         raise ValueError("ไฟล์ Detail ไม่มีคอลัมน์ 'invoice_number'")
         
+    # กรองแถวว่าง / แถวสรุปผลรวมท้ายไฟล์ที่ไม่มีเลขที่ใบแจ้งหนี้
+    df_header = df_header[df_header["invoice_number"].notna()].copy()
+    df_detail = df_detail[df_detail["invoice_number"].notna()].copy()
+    
     df_header["invoice_number"] = df_header["invoice_number"].astype(str).str.strip()
     df_detail["invoice_number"] = df_detail["invoice_number"].astype(str).str.strip()
     
-    df_header = df_header[df_header["invoice_number"] != ""].copy()
-    df_detail = df_detail[df_detail["invoice_number"] != ""].copy()
+    df_header = df_header[~df_header["invoice_number"].str.lower().isin(["", "nan", "none"])].copy()
+    df_detail = df_detail[~df_detail["invoice_number"].str.lower().isin(["", "nan", "none"])].copy()
     
     # ไม่นำเข้าบิลที่ขึ้นต้นด้วย CA หรือ HA
     excluded_prefixes = ("CA", "HA")
@@ -299,7 +303,7 @@ def transform_to_autoline_data(df_header, df_detail):
         
     for _, h_row in df_header.iterrows():
         inv_no = str(h_row["invoice_number"]).strip()
-        if not inv_no or inv_no.upper().startswith(("CA", "HA")):
+        if not inv_no or inv_no.lower() in ("nan", "none") or inv_no.upper().startswith(("CA", "HA")):
             continue
             
         doc_date = h_row.get("parsed_date")
