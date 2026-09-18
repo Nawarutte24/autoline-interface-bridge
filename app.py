@@ -1412,64 +1412,30 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             })
             
         else:
-            if len(gl_lines) > 1:
-                total_gl_tax = sum(abs(l["cr"] or l["dr"] or 0.0) for l in gl_lines)
-                if total_gl_tax > 0:
-                    allocated_net = 0.0
-                    for idx_l, gl_l in enumerate(gl_lines):
-                        l_desc = gl_l["desc"]
-                        l_tax = abs(gl_l["cr"] or gl_l["dr"] or 0.0)
-                        l_cat = classify_description_text(l_desc)
-                        l_cat_cfg = cfg["categories"].get(l_cat, cfg["categories"]["DEPOSIT"])
+            # 0XD / 0XDC: Consolidate to 2 lines per invoice (Line 1 Dr AR, Line 2 Cr Category GL)
+            cat_priority = ['COMM_FINANCE', 'REGISTRATION', 'ACCESSORIES', 'RED_PLATE', 'DEPOSIT']
+            main_cat = 'DEPOSIT'
+            if gl_lines:
+                found_cats = set()
+                for l in gl_lines:
+                    d = l.get('desc', '')
+                    if d:
+                        found_cats.add(classify_description_text(d))
+                for p in cat_priority:
+                    if p in found_cats:
+                        main_cat = p
+                        break
                         
-                        if idx_l == len(gl_lines) - 1:
-                            l_net = round(abs_net - allocated_net, 2)
-                        else:
-                            l_net = round(abs_net * (l_tax / total_gl_tax), 2)
-                            allocated_net += l_net
-                            
-                        itemized_lines.append({
-                            "category": l_cat,
-                            "gl": l_cat_cfg["rev_gl"],
-                            "dept": l_cat_cfg["rev_dept"],
-                            "net_amount": l_net,
-                            "line_narrative": narrative
-                        })
-                else:
-                    l_cat = classify_description_text(gl_lines[0]["desc"]) if gl_lines else "DEPOSIT"
-                    l_cat_cfg = cfg["categories"].get(l_cat, cfg["categories"]["DEPOSIT"])
-                    itemized_lines.append({
-                        "category": l_cat,
-                        "gl": l_cat_cfg["rev_gl"],
-                        "dept": l_cat_cfg["rev_dept"],
-                        "net_amount": abs_net,
-                        "line_narrative": narrative
-                    })
-            elif len(gl_lines) == 1:
-                l_cat = classify_description_text(gl_lines[0]["desc"])
-                l_cat_cfg = cfg["categories"].get(l_cat, cfg["categories"]["DEPOSIT"])
-                itemized_lines.append({
-                    "category": l_cat,
-                    "gl": l_cat_cfg["rev_gl"],
-                    "dept": l_cat_cfg["rev_dept"],
-                    "net_amount": abs_net,
-                    "line_narrative": narrative
-                })
-            else:
-                cat_key = "DEPOSIT"
-                cat_cfg = cfg["categories"][cat_key]
-                itemized_lines.append({
-                    "category": cat_key,
-                    "gl": cat_cfg["rev_gl"],
-                    "dept": cat_cfg["rev_dept"],
-                    "net_amount": abs_net,
-                    "line_narrative": narrative
-                })
-                
-            main_cat = itemized_lines[0]["category"]
             main_cat_cfg = cfg["categories"].get(main_cat, cfg["categories"]["DEPOSIT"])
-            subaccount = main_cat_cfg["subaccount"]
+            itemized_lines.append({
+                "category": main_cat,
+                "gl": main_cat_cfg["rev_gl"],
+                "dept": main_cat_cfg["rev_dept"],
+                "net_amount": abs_net,
+                "line_narrative": narrative
+            })
             
+            subaccount = main_cat_cfg["subaccount"]
             if main_cat == "COMM_FINANCE":
                 fin_code = resolve_finance_subaccount(inv_no, cust_name, "", fin_data, default_code=None)
                 if fin_code:
