@@ -1494,6 +1494,7 @@ def load_gl_descriptions(file_or_path):
         if not doc:
             continue
         doc_str = str(doc).strip()
+        acc = str(ws.cell(row=r, column=3).value or '').strip()
         desc_str = str(ws.cell(row=r, column=12).value or '').strip()
         cr = ws.cell(row=r, column=9).value
         dr = ws.cell(row=r, column=8).value
@@ -1504,6 +1505,7 @@ def load_gl_descriptions(file_or_path):
         if doc_str not in gl_map:
             gl_map[doc_str] = []
         gl_map[doc_str].append({
+            "acc": acc,
             "desc": desc_str,
             "cr": f_cr,
             "dr": f_dr,
@@ -1955,55 +1957,103 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             })
             
         else:
-            # 0XD / 0XDC: Consolidate to 2 lines per invoice (Line 1 Dr AR, Line 2 Cr Category GL)
-            cat_priority = ['PARTS_DEPOSIT', 'FEE', 'COMM_FINANCE', 'REGISTRATION', 'ACCESSORIES', 'RED_PLATE', 'DEPOSIT']
-            main_cat = 'DEPOSIT'
-            if gl_lines:
-                found_cats = set()
-                for l in gl_lines:
-                    d = l.get('desc', '')
-                    if d:
-                        found_cats.add(classify_description_text(d))
-                for p in cat_priority:
-                    if p in found_cats:
-                        main_cat = p
-                        break
-            else:
-                c_cat = classify_description_text(cust_name)
-                if c_cat in ['PARTS_DEPOSIT', 'FEE', 'COMM_FINANCE', 'REGISTRATION', 'ACCESSORIES', 'RED_PLATE']:
-                    main_cat = c_cat
-                        
-            main_cat_cfg = cfg["categories"].get(main_cat, cfg["categories"]["DEPOSIT"])
-            itemized_lines.append({
-                "category": main_cat,
-                "gl": main_cat_cfg["rev_gl"],
-                "dept": main_cat_cfg["rev_dept"],
-                "net_amount": abs_net,
-                "line_narrative": narrative
-            })
+            # 0XD / 0XDC: Check if fee line (FEE) is present along with other revenue lines
+            rev_candidates = [
+                l for l in gl_lines
+                if l.get("cr") is not None and l["cr"] < 0 and (
+                    str(l.get("acc", "")).startswith(("4", "216", "219")) or
+                    not str(l.get("acc", "")).startswith(("213", "112", "G"))
+                )
+            ]
             
-            if main_cat == "PARTS_DEPOSIT":
-                subaccount = "D0001"
-            elif main_cat == "COMM_FINANCE":
-                fin_code = resolve_finance_subaccount(inv_no, cust_name, "", fin_data, default_code=None)
-                if fin_code:
-                    subaccount = fin_code
+            has_fee = any(classify_description_text(l.get("desc", "")) == "FEE" for l in rev_candidates)
+            split_lines_done = False
+            
+            if has_fee and len(rev_candidates) > 1:
+                cat_amounts = {}
+                for l in rev_candidates:
+                    c_key = classify_description_text(l.get("desc", ""))
+                    c_amt = abs(float(l.get("cr", 0.0)))
+                    cat_amounts[c_key] = cat_amounts.get(c_key, 0.0) + c_amt
+                    
+                tot_rev = sum(cat_amounts.values())
+                if tot_rev > 0 and "FEE" in cat_amounts and len(cat_amounts) > 1:
+                    allocated = 0.0
+                    # Put other categories first (e.g. ACCESSORIES), and FEE last
+                    ordered_cats = [c for c in cat_amounts if c != "FEE"] + ["FEE"]
+                    for idx_c, c_key in enumerate(ordered_cats):
+                        if idx_c == len(ordered_cats) - 1:
+                            c_net = round(abs_net - allocated, 2)
+                        else:
+                            c_net = round(abs_net * (cat_amounts[c_key] / tot_rev), 2)
+                            allocated += c_net
+                            
+                        c_cfg = cfg["categories"].get(c_key, cfg["categories"]["ACCESSORIES"])
+                        itemized_lines.append({
+                            "category": c_key,
+                            "gl": c_cfg["rev_gl"],
+                            "dept": c_cfg["rev_dept"],
+                            "net_amount": c_net,
+                            "line_narrative": narrative
+                        })
+                    split_lines_done = True
+                    subaccount = "X0003"
+                    matched_corp = resolve_unified_arcode(dealerpro_code=None, customer_name=cust_name, context="sale", default_override=None)
+                    if matched_corp and matched_corp != "X0003":
+                        subaccount = matched_corp
+                        
+            if not split_lines_done:
+                cat_priority = ['PARTS_DEPOSIT', 'FEE', 'COMM_FINANCE', 'REGISTRATION', 'ACCESSORIES', 'RED_PLATE', 'DEPOSIT']
+                main_cat = 'DEPOSIT'
+                if gl_lines:
+                    found_cats = set()
+                    for l in gl_lines:
+                        d = l.get('desc', '')
+                        if d:
+                            found_cats.add(classify_description_text(d))
+                    for p in cat_priority:
+                        if p in found_cats:
+                            main_cat = p
+                            break
+                else:
+                    c_cat = classify_description_text(cust_name)
+                    if c_cat in ['PARTS_DEPOSIT', 'FEE', 'COMM_FINANCE', 'REGISTRATION', 'ACCESSORIES', 'RED_PLATE']:
+                        main_cat = c_cat
+                            
+                main_cat_cfg = cfg["categories"].get(main_cat, cfg["categories"]["DEPOSIT"])
+                itemized_lines.append({
+                    "category": main_cat,
+                    "gl": main_cat_cfg["rev_gl"],
+                    "dept": main_cat_cfg["rev_dept"],
+                    "net_amount": abs_net,
+                    "line_narrative": narrative
+                })
+                
+                if main_cat == "PARTS_DEPOSIT":
+                    subaccount = "D0001"
+                elif main_cat == "COMM_FINANCE":
+                    fin_code = resolve_finance_subaccount(inv_no, cust_name, "", fin_data, default_code=None)
+                    if fin_code:
+                        subaccount = fin_code
+                    else:
+                        subaccount = main_cat_cfg["subaccount"]
                 else:
                     subaccount = main_cat_cfg["subaccount"]
-            else:
-                subaccount = main_cat_cfg["subaccount"]
-                matched_corp = resolve_unified_arcode(dealerpro_code=None, customer_name=cust_name, context="sale", default_override=None)
-                if matched_corp and matched_corp != "X0003":
-                    subaccount = matched_corp
-            
+                    matched_corp = resolve_unified_arcode(dealerpro_code=None, customer_name=cust_name, context="sale", default_override=None)
+                    if matched_corp and matched_corp != "X0003":
+                        subaccount = matched_corp
+                        
         main_cat = itemized_lines[0]["category"]
         main_cat_cfg = cfg["categories"].get(main_cat, cfg["categories"]["DEPOSIT"])
         
         ar_dept = main_cat_cfg.get("ar_dept", cfg.get("ar_department", "0000"))
         ar_gl = int(main_cat_cfg.get("ar_gl", cfg.get("ar_gl_code", 11311001)))
         
-        cat_counts[main_cat] += 1
-        cat_values[main_cat] += abs_net
+        for itm in itemized_lines:
+            c_name = itm["category"]
+            if c_name in cat_counts:
+                cat_counts[c_name] += 1
+                cat_values[c_name] += itm["net_amount"]
         
         # Header Record
         header_record = {
