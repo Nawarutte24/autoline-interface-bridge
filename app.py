@@ -114,6 +114,7 @@ UNIFIED_ARCODE_BY_DEALERPRO = {
     "2419": "A0025",  # บริษัท มาสเตอร์ คาร์เร้นเทิล จำกัด
     "1527": "X0005",  # บริษัท เอ็กซ์ โมบิลิตี้ พลัส จำกัด
     "1526": "X0006",  # บริษัท เอ็กซ์ โมบิลิตี้ (ประเทศไทย) จำกัด
+    "2907": "M0012",  # MMS BOSCH สาขา ภูเก็ต
 }
 
 UNIFIED_CUSTOMER_ENTRIES = [
@@ -860,6 +861,408 @@ def generate_output_excel(template_path, rows_to_write):
     wb.save(output_stream)
     output_stream.seek(0)
     return output_stream
+
+
+# =============================================================================
+# 3.2. PARTS OVER-THE-COUNTER SALES TRANSFORMER (01P / 02P / 01PC / 02PC)
+# =============================================================================
+def parse_parts_sales_file(file_obj_or_path):
+    """
+    อ่านและแปลงโครงสร้างรายงานการขายอะไหล่ (เช่น AftersalePart2026.xlsx)
+    สกัดเฉพาะบิลขายอะไหล่หน้าร้าน (01P, 02P) และใบลดหนี้ (01PC, 02PC)
+    """
+    import re
+    wb = openpyxl.load_workbook(file_obj_or_path, data_only=True)
+    ws = wb.active
+
+    current_cust_code = ""
+    current_cust_name = ""
+    current_branch_code = "0001"
+    invoices = {}
+
+    for r in range(1, ws.max_row + 1):
+        c1 = str(ws.cell(row=r, column=1).value or "").strip()
+        c2 = str(ws.cell(row=r, column=2).value or "").strip()
+        
+        if c1.startswith("สาขา:"):
+            br = c1.replace("สาขา:", "").strip()
+            if br == "01": current_branch_code = "0001"
+            elif br == "02": current_branch_code = "0002"
+            else: current_branch_code = br.zfill(4)
+            continue
+            
+        if c1.startswith("ลูกค้า:"):
+            current_cust_code = c1.replace("ลูกค้า:", "").strip()
+            current_cust_name = c2
+            continue
+            
+        if c1.startswith("รวม") or c1.lower().startswith("total") or c1.startswith("<====") or c1.startswith("บริษัท:") or c1.startswith("ฝ่าย:"):
+            continue
+            
+        if c1.startswith("เอกสารเลขที่:"):
+            continue
+
+        date_raw = ws.cell(row=r, column=3).value
+        # Match invoice patterns like 01P..., 02P..., 01PC..., 02PC...
+        if c1 and (re.search(r'^\d{2}P', c1, re.IGNORECASE) or re.search(r'^\d{2}PC', c1, re.IGNORECASE)) and date_raw:
+            inv_no = c1
+            cust_code = str(ws.cell(row=r, column=2).value or current_cust_code).strip()
+            part_desc = str(ws.cell(row=r, column=4).value or "").strip()
+            qty = float(ws.cell(row=r, column=6).value or 0.0)
+            retail_price = float(ws.cell(row=r, column=7).value or 0.0)
+            net_sales = float(ws.cell(row=r, column=8).value or 0.0)
+            cost = float(ws.cell(row=r, column=9).value or 0.0)
+            vat = float(ws.cell(row=r, column=10).value or 0.0)
+            
+            # Parse Date
+            if isinstance(date_raw, (datetime.datetime, pd.Timestamp)):
+                doc_date = date_raw.date() if hasattr(date_raw, 'date') else date_raw
+            elif isinstance(date_raw, str):
+                try:
+                    doc_date = datetime.datetime.strptime(date_raw.strip(), "%d/%m/%y").date()
+                except:
+                    try:
+                        doc_date = datetime.datetime.strptime(date_raw.strip(), "%d/%m/%Y").date()
+                    except:
+                        doc_date = datetime.date.today()
+            else:
+                doc_date = datetime.date.today()
+                
+            branch = current_branch_code
+            if inv_no.startswith("01"): branch = "0001"
+            elif inv_no.startswith("02"): branch = "0002"
+            
+            if inv_no not in invoices:
+                invoices[inv_no] = {
+                    "inv_no": inv_no,
+                    "cust_code": cust_code,
+                    "cust_name": current_cust_name,
+                    "branch": branch,
+                    "doc_date": doc_date,
+                    "items": [],
+                    "total_net": 0.0,
+                    "total_vat": 0.0,
+                    "total_cost": 0.0
+                }
+            invoices[inv_no]["items"].append({
+                "part": part_desc,
+                "qty": qty,
+                "net_sales": net_sales,
+                "cost": cost,
+                "vat": vat
+            })
+            invoices[inv_no]["total_net"] += net_sales
+            invoices[inv_no]["total_vat"] += vat
+            invoices[inv_no]["total_cost"] += cost
+            
+    return invoices
+
+
+def transform_parts_sales_to_autoline(invoices_dict, config=None):
+    """
+    แปลงข้อมูลขายอะไหล่หน้าร้าน (01P / 01PC) เป็นรายการ Autoline AR Journal Import
+    พร้อมลงบันทึกต้นทุนและสต็อกอะไหล่ (COGS & Inventory)
+    """
+    if config is None:
+        config = {}
+        
+    rows_to_write = []
+    preview_records = []
+    
+    total_debit_sum = 0.0
+    total_credit_sum = 0.0
+    total_parts_cogs = 0.0
+    
+    inv_revenue = 0.0
+    inv_tax = 0.0
+    inv_ar = 0.0
+    cn_revenue = 0.0
+    cn_tax = 0.0
+    cn_ar = 0.0
+    
+    count_inv = 0
+    count_cn = 0
+    
+    batch_idx = 1
+    sorted_inv_keys = sorted(invoices_dict.keys())
+    
+    for inv_no in sorted_inv_keys:
+        inv_data = invoices_dict[inv_no]
+        cust_code = inv_data.get("cust_code", "")
+        cust_name = inv_data.get("cust_name", "")
+        doc_date = inv_data.get("doc_date", datetime.date.today())
+        branch = inv_data.get("branch", "0001")
+        
+        raw_net = inv_data.get("total_net", 0.0)
+        raw_vat = inv_data.get("total_vat", 0.0)
+        raw_cost = inv_data.get("total_cost", 0.0)
+        
+        is_cn = ("PC" in inv_no.upper()) or (raw_net < 0) or (raw_vat < 0)
+        
+        net_amt = round(abs(raw_net), 2)
+        vat_amt = round(abs(raw_vat), 2)
+        gross_amt = round(net_amt + vat_amt, 2)
+        cost_amt = round(abs(raw_cost), 2)
+        
+        doc_code = "ARC" if is_cn else "ARI"
+        doc_seq = "PCREDITV" if is_cn else "PINVOICV"
+        has_vat = (vat_amt > 0)
+        tax_group_val = "U" if has_vat else "OS"
+        crcode_val = "00000004" if is_cn else None
+        
+        narrative = f"{inv_no}_{cust_name}" if cust_name else inv_no
+        subaccount = resolve_unified_arcode(dealerpro_code=cust_code, customer_name=cust_name, context="aftersale")
+        
+        if is_cn:
+            count_cn += 1
+            cn_revenue += net_amt
+            cn_tax += vat_amt
+            cn_ar += gross_amt
+        else:
+            count_inv += 1
+            inv_revenue += net_amt
+            inv_tax += vat_amt
+            inv_ar += gross_amt
+            
+        # 1. Header Row
+        header_record = {
+            "type": "HEADER",
+            "A": inv_no,
+            "B": inv_no,
+            "C": 1,
+            "D": batch_idx,
+            "E": None,
+            "F": doc_code,
+            "G": "THB",
+            "H": doc_seq,
+            "I": vat_amt,
+            "J": gross_amt,
+            "K": doc_date,
+            "L": None,
+            "M": inv_no,
+            "N": narrative,
+            "O": doc_date,
+            "P": subaccount,
+            "Q": None,
+            "R": None,
+            "S": None,
+            "T": None,
+            "U": tax_group_val,
+            "V": None,
+            "W": 30,
+            "X": branch,
+            "Y": crcode_val
+        }
+        rows_to_write.append(header_record)
+        preview_records.append({
+            "Invoice": inv_no,
+            "Row Type": f"HEADER ({doc_code})",
+            "Batch": batch_idx,
+            "Line": "",
+            "Doc Code": doc_code,
+            "Doc Seq": doc_seq,
+            "Date": doc_date.strftime("%Y-%m-%d") if hasattr(doc_date, "strftime") else str(doc_date),
+            "GL Code": "",
+            "Department": "",
+            "Debit": "",
+            "Credit": "",
+            "Tax": vat_amt,
+            "Total Value": gross_amt,
+            "Narrative": narrative,
+            "Branch": branch,
+            "Subaccount": subaccount
+        })
+        
+        # 2. Blank Row
+        rows_to_write.append({"type": "BLANK"})
+        
+        # 3. Line 1: AR Control Account (11311001 / Dept 0000)
+        ar_gl = 11311001
+        ar_dept = "0000"
+        ar_debit = None if is_cn else gross_amt
+        ar_credit = gross_amt if is_cn else None
+        
+        ar_record = {
+            "type": "ITEM",
+            "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
+            "G": "THB", "H": 1,
+            "I": branch, "J": ar_dept, "K": ar_gl, "L": None,
+            "M": ar_debit, "N": ar_credit, "O": narrative, "P": None, "Q": None,
+            "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
+            "X": None, "Y": None, "Z": None, "AA": None, "AB": None, "AC": None, "AD": None
+        }
+        rows_to_write.append(ar_record)
+        if ar_debit is not None: total_debit_sum += ar_debit
+        if ar_credit is not None: total_credit_sum += ar_credit
+        
+        preview_records.append({
+            "Invoice": inv_no,
+            "Row Type": "CREDIT (AR)" if is_cn else "DEBIT (AR)",
+            "Batch": batch_idx,
+            "Line": 1,
+            "Doc Code": "",
+            "Doc Seq": "",
+            "Date": doc_date.strftime("%Y-%m-%d") if hasattr(doc_date, "strftime") else str(doc_date),
+            "GL Code": str(ar_gl),
+            "Department": ar_dept,
+            "Debit": ar_debit if ar_debit is not None else "",
+            "Credit": ar_credit if ar_credit is not None else "",
+            "Tax": "",
+            "Total Value": "",
+            "Narrative": narrative,
+            "Branch": branch,
+            "Subaccount": subaccount
+        })
+        
+        # 4. Line 2: Parts Revenue (41211001 / Dept 4002)
+        parts_rev_gl = 41211001
+        parts_dept = "4002"
+        tax_code_val = "S" if has_vat else "O"
+        rev_debit = net_amt if is_cn else None
+        rev_credit = None if is_cn else net_amt
+        
+        rev_record = {
+            "type": "ITEM",
+            "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
+            "G": "THB", "H": 2,
+            "I": branch, "J": parts_dept, "K": parts_rev_gl, "L": None,
+            "M": rev_debit, "N": rev_credit, "O": narrative, "P": None, "Q": tax_code_val,
+            "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
+            "X": "R", "Y": None, "Z": "J", "AA": None, "AB": "A", "AC": None, "AD": None
+        }
+        rows_to_write.append(rev_record)
+        if rev_debit is not None: total_debit_sum += rev_debit
+        if rev_credit is not None: total_credit_sum += rev_credit
+        
+        preview_records.append({
+            "Invoice": inv_no,
+            "Row Type": "DEBIT (Parts Rev)" if is_cn else "CREDIT (Parts Rev)",
+            "Batch": batch_idx,
+            "Line": 2,
+            "Doc Code": "",
+            "Doc Seq": "",
+            "Date": doc_date.strftime("%Y-%m-%d") if hasattr(doc_date, "strftime") else str(doc_date),
+            "GL Code": str(parts_rev_gl),
+            "Department": parts_dept,
+            "Debit": rev_debit if rev_debit is not None else "",
+            "Credit": rev_credit if rev_credit is not None else "",
+            "Tax": tax_code_val,
+            "Total Value": "",
+            "Narrative": narrative,
+            "Branch": branch,
+            "Subaccount": ""
+        })
+        
+        # 5. Line 3 & Line 4: COGS & Inventory (if cost > 0)
+        line_num = 3
+        if cost_amt > 0:
+            total_parts_cogs += cost_amt
+            cogs_gl = 51211006
+            cogs_dept = "4002"
+            cogs_debit = cost_amt if not is_cn else None
+            cogs_credit = None if not is_cn else cost_amt
+            
+            cogs_record = {
+                "type": "ITEM",
+                "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
+                "G": "THB", "H": line_num,
+                "I": branch, "J": cogs_dept, "K": cogs_gl, "L": None,
+                "M": cogs_debit, "N": cogs_credit, "O": narrative, "P": None, "Q": "O",
+                "R": None, "S": None, "T": None, "U": None, "V": None, "W": None,
+                "X": "R", "Y": None, "Z": "J", "AA": None, "AB": "A", "AC": None, "AD": None
+            }
+            rows_to_write.append(cogs_record)
+            if cogs_debit is not None: total_debit_sum += cogs_debit
+            if cogs_credit is not None: total_credit_sum += cogs_credit
+            
+            preview_records.append({
+                "Invoice": inv_no,
+                "Row Type": "CREDIT (COGS)" if is_cn else "DEBIT (COGS)",
+                "Batch": batch_idx,
+                "Line": line_num,
+                "Doc Code": "",
+                "Doc Seq": "",
+                "Date": doc_date.strftime("%Y-%m-%d") if hasattr(doc_date, "strftime") else str(doc_date),
+                "GL Code": str(cogs_gl),
+                "Department": cogs_dept,
+                "Debit": cogs_debit if cogs_debit is not None else "",
+                "Credit": cogs_credit if cogs_credit is not None else "",
+                "Tax": "O",
+                "Total Value": "",
+                "Narrative": narrative,
+                "Branch": branch,
+                "Subaccount": ""
+            })
+            line_num += 1
+            
+            inv_gl = 11511112
+            inv_dept = "0000"
+            inv_debit = cost_amt if is_cn else None
+            inv_credit = None if is_cn else cost_amt
+            
+            inv_stock_record = {
+                "type": "ITEM",
+                "B": None, "C": None, "D": batch_idx, "E": None, "F": None,
+                "G": "THB", "H": line_num,
+                "I": branch, "J": inv_dept, "K": inv_gl, "L": None,
+                "M": inv_debit, "N": inv_credit, "O": narrative, "P": None, "Q": "O",
+                "R": None, "S": None, "T": None, "U": "JEEP", "V": "JEEP-G6", "W": None,
+                "X": None, "Y": None, "Z": None, "AA": None, "AB": None, "AC": None, "AD": None
+            }
+            rows_to_write.append(inv_stock_record)
+            if inv_debit is not None: total_debit_sum += inv_debit
+            if inv_credit is not None: total_credit_sum += inv_credit
+            
+            preview_records.append({
+                "Invoice": inv_no,
+                "Row Type": "DEBIT (Stock)" if is_cn else "CREDIT (Stock)",
+                "Batch": batch_idx,
+                "Line": line_num,
+                "Doc Code": "",
+                "Doc Seq": "",
+                "Date": doc_date.strftime("%Y-%m-%d") if hasattr(doc_date, "strftime") else str(doc_date),
+                "GL Code": str(inv_gl),
+                "Department": inv_dept,
+                "Debit": inv_debit if inv_debit is not None else "",
+                "Credit": inv_credit if inv_credit is not None else "",
+                "Tax": "O",
+                "Total Value": "",
+                "Narrative": narrative,
+                "Branch": branch,
+                "Subaccount": ""
+            })
+            
+        rows_to_write.append({"type": "BLANK"})
+        batch_idx += 1
+        
+    if rows_to_write and rows_to_write[-1].get("type") == "BLANK":
+        rows_to_write.pop()
+        
+    net_revenue = round(inv_revenue - cn_revenue, 2)
+    net_tax = round(inv_tax - cn_tax, 2)
+    net_ar = round(inv_ar - cn_ar, 2)
+    
+    summary_stats = {
+        "total_documents": len(invoices_dict),
+        "count_inv": count_inv,
+        "count_cn": count_cn,
+        "total_debit": round(total_debit_sum, 2),
+        "total_credit": round(total_credit_sum, 2),
+        "total_parts_cogs": round(total_parts_cogs, 2),
+        "net_revenue": net_revenue,
+        "net_tax": net_tax,
+        "net_ar": net_ar,
+        "inv_revenue": round(inv_revenue, 2),
+        "inv_tax": round(inv_tax, 2),
+        "inv_ar": round(inv_ar, 2),
+        "cn_revenue": round(cn_revenue, 2),
+        "cn_tax": round(cn_tax, 2),
+        "cn_ar": round(cn_ar, 2),
+        "is_balanced": abs((total_debit_sum - total_credit_sum) - (inv_tax - cn_tax)) < 0.05,
+        "difference": round(abs((total_debit_sum - total_credit_sum) - (inv_tax - cn_tax)), 2)
+    }
+    
+    return rows_to_write, summary_stats, pd.DataFrame(preview_records)
 
 
 # =============================================================================
@@ -1910,99 +2313,206 @@ tab_aftersales, tab_sales = st.tabs([
 # TAB 1: AFTERSALES INTERFACE
 # =============================================================================
 with tab_aftersales:
-    col_up1, col_up2 = st.columns(2)
-    with col_up1:
-        st.subheader("1. อัปโหลดไฟล์ HEADER")
-        st.caption("ไฟล์ที่มีเลขที่บิล, วันที่, ข้อมูลลูกค้า, และยอดรวม (.xlsx หรือ .csv)")
-        header_file = st.file_uploader("เลือกไฟล์ HEADER (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="header_upload")
+    subtab_service, subtab_parts = st.tabs([
+        "🛠️ งานบริการศูนย์บริการ (Service Workshop: 01S / 02S)",
+        "📦 งานขายอะไหล่หน้าร้าน (Parts Sales: 01P / 01PC)"
+    ])
+
+    # -------------------------------------------------------------------------
+    # SUB-TAB 1: SERVICE WORKSHOP (01S / 02S)
+    # -------------------------------------------------------------------------
+    with subtab_service:
+        col_up1, col_up2 = st.columns(2)
+        with col_up1:
+            st.subheader("1. อัปโหลดไฟล์ HEADER")
+            st.caption("ไฟล์ที่มีเลขที่บิล, วันที่, ข้อมูลลูกค้า, และยอดรวม (.xlsx หรือ .csv)")
+            header_file = st.file_uploader("เลือกไฟล์ HEADER (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="header_upload")
+            
+        with col_up2:
+            st.subheader("2. อัปโหลดไฟล์ DETAIL")
+            st.caption("ไฟล์ที่มีรายการแยกตามหมวด อะไหล่ P, ค่าแรง L, บริการ S (.xlsx หรือ .csv)")
+            detail_file = st.file_uploader("เลือกไฟล์ DETAIL (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="detail_upload")
+
+        if header_file and detail_file:
+            try:
+                with st.spinner("กำลังแปลงข้อมูลและคำนวณดุลบัญชีอัตโนมัติ..."):
+                    df_header, df_detail = load_and_validate_inputs(header_file, detail_file)
+                    rows_to_write, summary_stats, preview_df = transform_to_autoline_data(
+                        df_header, df_detail
+                    )
+                    
+                st.success("✅ แปลงข้อมูลสำเร็จเรียบร้อย!")
+                
+                # KPI Dashboard
+                st.markdown("### 📊 สรุปตัวเลขและความสมดุลทางบัญชี (Balance Verification)")
+                kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
+                
+                cn_label = f"Inv: {summary_stats['count_inv']:,} | CN: {summary_stats['count_cn']:,}" if summary_stats['count_cn'] > 0 else f"{summary_stats['count_inv']:,} ใบ"
+                kpi1.metric("จำนวนเอกสารทั้งหมด", f"{summary_stats['total_documents']:,} ฉบับ", delta=cn_label if summary_stats['count_cn'] > 0 else None)
+                
+                kpi2.metric(
+                    "ยอดขายสุทธิ (Revenue)", 
+                    f"{summary_stats['net_revenue']:,.2f} ฿",
+                    delta=f"CN: -{summary_stats['cn_revenue']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+                )
+                kpi3.metric(
+                    "ภาษี 7% (VAT)", 
+                    f"{summary_stats['net_tax']:,.2f} ฿",
+                    delta=f"CN: -{summary_stats['cn_tax']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+                )
+                kpi4.metric(
+                    "ยอดลูกหนี้สุทธิ (AR)", 
+                    f"{summary_stats['net_ar']:,.2f} ฿",
+                    delta=f"CN: -{summary_stats['cn_ar']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
+                )
+                kpi5.metric(
+                    "ต้นทุนอะไหล่ (COGS)",
+                    f"{summary_stats.get('total_parts_cogs', 0.0):,.2f} ฿",
+                    delta="Dr 51211006 / Cr 11511112"
+                )
+                
+                if summary_stats["is_balanced"]:
+                    kpi6.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta=f"ดุลครบทุกบิล ({summary_stats['total_documents']}/{summary_stats['total_documents']})")
+                else:
+                    kpi6.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
+
+                # Download Button
+                st.markdown("---")
+                col_dl1, col_dl2 = st.columns([2, 1])
+                with col_dl1:
+                    st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline")
+                    st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR/AP (รองรับทั้งบิล ARI และใบลดหนี้ ARC พร้อมเว้นบรรทัดตามมาตรฐาน)")
+                with col_dl2:
+                    excel_output = generate_output_excel(template_path, rows_to_write)
+                    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    st.download_button(
+                        label="⬇️ ดาวน์โหลด Autoline_Import.xlsx",
+                        data=excel_output,
+                        file_name=f"Autoline_Import_{now_str}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                    
+                # Table Preview
+                st.markdown("### 🔍 ตรวจสอบข้อมูลก่อนดาวน์โหลด (Data Preview)")
+                search_kw = st.text_input("ค้นหาเอกสาร (เลขที่บิล, ใบลดหนี้, เลขที่อ้างอิง, ชื่อลูกค้า หรือ Doc Code)", placeholder="เช่น 01SC26050001, ARC, HA0027, SINVOICV", key="af_search")
+                
+                display_df = preview_df
+                if search_kw.strip():
+                    kw = search_kw.strip().lower()
+                    mask = (
+                        preview_df["Invoice"].astype(str).str.lower().str.contains(kw, na=False) |
+                        preview_df["Narrative"].astype(str).str.lower().str.contains(kw, na=False) |
+                        preview_df["Doc Code"].astype(str).str.lower().str.contains(kw, na=False) |
+                        preview_df["Doc Seq"].astype(str).str.lower().str.contains(kw, na=False) |
+                        preview_df["Row Type"].astype(str).str.lower().str.contains(kw, na=False)
+                    )
+                    display_df = preview_df[mask]
+                    
+                st.dataframe(display_df, use_container_width=True, height=450)
+                
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการประมวลผล: {str(e)}")
+        else:
+            st.info("💡 กรุณาอัปโหลดไฟล์ HEADER และ DETAIL ด้านบนเพื่อเริ่มต้นแปลงข้อมูลงานบริการหลังการขาย")
+
+    # -------------------------------------------------------------------------
+    # SUB-TAB 2: PARTS OVER-THE-COUNTER SALES (01P / 02P / 01PC / 02PC)
+    # -------------------------------------------------------------------------
+    with subtab_parts:
+        st.subheader("📦 อัปโหลดรายงานการขายอะไหล่ (Parts Sales Report)")
+        st.caption("ไฟล์รายงานการขายอะไหล่ เช่น `AftersalePart2026.xlsx` (มีเลขที่เอกสาร 01P/01PC, รหัสลูกค้า, อะไหล่, จำนวน, ราคาขาย, ต้นทุน, VAT)")
+        parts_file = st.file_uploader("เลือกไฟล์รายงานการขายอะไหล่ (.xlsx / .xls)", type=["xlsx", "xls"], key="parts_file_upload")
         
-    with col_up2:
-        st.subheader("2. อัปโหลดไฟล์ DETAIL")
-        st.caption("ไฟล์ที่มีรายการแยกตามหมวด อะไหล่ P, ค่าแรง L, บริการ S (.xlsx หรือ .csv)")
-        detail_file = st.file_uploader("เลือกไฟล์ DETAIL (.xlsx / .csv)", type=["xlsx", "xls", "csv"], key="detail_upload")
-
-    if header_file and detail_file:
-        try:
-            with st.spinner("กำลังแปลงข้อมูลและคำนวณดุลบัญชีอัตโนมัติ..."):
-                df_header, df_detail = load_and_validate_inputs(header_file, detail_file)
-                rows_to_write, summary_stats, preview_df = transform_to_autoline_data(
-                    df_header, df_detail
-                )
-                
-            st.success("✅ แปลงข้อมูลสำเร็จเรียบร้อย!")
-            
-            # KPI Dashboard
-            st.markdown("### 📊 สรุปตัวเลขและความสมดุลทางบัญชี (Balance Verification)")
-            kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
-            
-            cn_label = f"Inv: {summary_stats['count_inv']:,} | CN: {summary_stats['count_cn']:,}" if summary_stats['count_cn'] > 0 else f"{summary_stats['count_inv']:,} ใบ"
-            kpi1.metric("จำนวนเอกสารทั้งหมด", f"{summary_stats['total_documents']:,} ฉบับ", delta=cn_label if summary_stats['count_cn'] > 0 else None)
-            
-            kpi2.metric(
-                "ยอดขายสุทธิ (Revenue)", 
-                f"{summary_stats['net_revenue']:,.2f} ฿",
-                delta=f"CN: -{summary_stats['cn_revenue']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
-            )
-            kpi3.metric(
-                "ภาษี 7% (VAT)", 
-                f"{summary_stats['net_tax']:,.2f} ฿",
-                delta=f"CN: -{summary_stats['cn_tax']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
-            )
-            kpi4.metric(
-                "ยอดลูกหนี้สุทธิ (AR)", 
-                f"{summary_stats['net_ar']:,.2f} ฿",
-                delta=f"CN: -{summary_stats['cn_ar']:,.2f} ฿" if summary_stats['count_cn'] > 0 else None
-            )
-            kpi5.metric(
-                "ต้นทุนอะไหล่ (COGS)",
-                f"{summary_stats.get('total_parts_cogs', 0.0):,.2f} ฿",
-                delta="Dr 51211006 / Cr 11511112"
-            )
-            
-            if summary_stats["is_balanced"]:
-                kpi6.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta=f"ดุลครบทุกบิล ({summary_stats['total_documents']}/{summary_stats['total_documents']})")
-            else:
-                kpi6.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
-
-            # Download Button
-            st.markdown("---")
-            col_dl1, col_dl2 = st.columns([2, 1])
-            with col_dl1:
-                st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline")
-                st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR/AP (รองรับทั้งบิล ARI และใบลดหนี้ ARC พร้อมเว้นบรรทัดตามมาตรฐาน)")
-            with col_dl2:
-                excel_output = generate_output_excel(template_path, rows_to_write)
-                now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                st.download_button(
-                    label="⬇️ ดาวน์โหลด Autoline_Import.xlsx",
-                    data=excel_output,
-                    file_name=f"Autoline_Import_{now_str}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-                
-            # Table Preview
-            st.markdown("### 🔍 ตรวจสอบข้อมูลก่อนดาวน์โหลด (Data Preview)")
-            search_kw = st.text_input("ค้นหาเอกสาร (เลขที่บิล, ใบลดหนี้, เลขที่อ้างอิง, ชื่อลูกค้า หรือ Doc Code)", placeholder="เช่น 01SC26050001, ARC, HA0027, SINVOICV", key="af_search")
-            
-            display_df = preview_df
-            if search_kw.strip():
-                kw = search_kw.strip().lower()
-                mask = (
-                    preview_df["Invoice"].astype(str).str.lower().str.contains(kw, na=False) |
-                    preview_df["Narrative"].astype(str).str.lower().str.contains(kw, na=False) |
-                    preview_df["Doc Code"].astype(str).str.lower().str.contains(kw, na=False) |
-                    preview_df["Doc Seq"].astype(str).str.lower().str.contains(kw, na=False) |
-                    preview_df["Row Type"].astype(str).str.lower().str.contains(kw, na=False)
-                )
-                display_df = preview_df[mask]
-                
-            st.dataframe(display_df, use_container_width=True, height=450)
-            
-        except Exception as e:
-            st.error(f"เกิดข้อผิดพลาดในการประมวลผล: {str(e)}")
-    else:
-        st.info("💡 กรุณาอัปโหลดไฟล์ HEADER และ DETAIL ด้านบนเพื่อเริ่มต้นแปลงข้อมูลงานบริการหลังการขาย")
+        if parts_file:
+            try:
+                with st.spinner("กำลังแปลงข้อมูลขายอะไหล่และคำนวณดุลบัญชีอัตโนมัติ..."):
+                    invoices_dict = parse_parts_sales_file(parts_file)
+                    if not invoices_dict:
+                        st.warning("⚠️ ไม่พบข้อมูลบิลขายอะไหล่ (01P / 01PC) ในไฟล์ที่อัปโหลด กรุณาตรวจสอบรูปแบบไฟล์")
+                    else:
+                        rows_parts, stats_parts, preview_parts = transform_parts_sales_to_autoline(invoices_dict)
+                        
+                        st.success(f"✅ แปลงข้อมูลขายอะไหล่สำเร็จเรียบร้อย! พบเอกสารทั้งหมด {stats_parts['total_documents']:,} ฉบับ")
+                        
+                        # KPI Dashboard
+                        st.markdown("### 📊 สรุปตัวเลขและความสมดุลทางบัญชี (Balance Verification)")
+                        kp1, kp2, kp3, kp4, kp5, kp6 = st.columns(6)
+                        
+                        cn_txt = f"Inv: {stats_parts['count_inv']:,} | CN: {stats_parts['count_cn']:,}" if stats_parts['count_cn'] > 0 else f"{stats_parts['count_inv']:,} ใบ"
+                        kp1.metric("จำนวนเอกสารทั้งหมด", f"{stats_parts['total_documents']:,} ฉบับ", delta=cn_txt if stats_parts['count_cn'] > 0 else None)
+                        
+                        kp2.metric(
+                            "ยอดขายสุทธิ (Revenue)",
+                            f"{stats_parts['net_revenue']:,.2f} ฿",
+                            delta=f"CN: -{stats_parts['cn_revenue']:,.2f} ฿" if stats_parts['count_cn'] > 0 else None
+                        )
+                        kp3.metric(
+                            "ภาษี 7% (VAT)",
+                            f"{stats_parts['net_tax']:,.2f} ฿",
+                            delta=f"CN: -{stats_parts['cn_tax']:,.2f} ฿" if stats_parts['count_cn'] > 0 else None
+                        )
+                        kp4.metric(
+                            "ยอดลูกหนี้สุทธิ (AR)",
+                            f"{stats_parts['net_ar']:,.2f} ฿",
+                            delta=f"CN: -{stats_parts['cn_ar']:,.2f} ฿" if stats_parts['count_cn'] > 0 else None
+                        )
+                        kp5.metric(
+                            "ต้นทุนอะไหล่ (COGS)",
+                            f"{stats_parts['total_parts_cogs']:,.2f} ฿",
+                            delta="Dr 51211006 / Cr 11511112"
+                        )
+                        
+                        if stats_parts["is_balanced"]:
+                            kp6.metric("สถานะดุลบัญชี", "สมดุล 100% ✅", delta="ผลต่าง 0.00 บาท")
+                        else:
+                            kp6.metric("สถานะดุลบัญชี", "พบผลต่าง ⚠️", delta=f"{stats_parts['difference']:,.2f} บาท")
+                            
+                        # Download Section
+                        st.markdown("---")
+                        col_pdl1, col_pdl2 = st.columns([2, 1])
+                        with col_pdl1:
+                            st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (Parts Sales)")
+                            st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR Journal Import (รองรับทั้งบิลขาย ARI และใบลดหนี้ ARC พร้อมบันทึกต้นทุนและสต็อก)")
+                        with col_pdl2:
+                            excel_parts_output = generate_output_excel(template_path, rows_parts)
+                            now_p_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            st.download_button(
+                                label="⬇️ ดาวน์โหลด Autoline_Import_PARTS.xlsx",
+                                data=excel_parts_output,
+                                file_name=f"Autoline_Import_PARTS_{now_p_str}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_parts_excel_btn",
+                                use_container_width=True
+                            )
+                            
+                        # Data Preview
+                        st.markdown("### 🔍 ตรวจสอบข้อมูลรายการขายอะไหล่ (Parts Data Preview)")
+                        parts_search_kw = st.text_input(
+                            "ค้นหาเอกสาร (เลขที่บิล, ชื่อลูกค้า, รหัส GL, Subaccount หรือ Narrative)",
+                            placeholder="เช่น 01P26030001, 01PC, MMS, ไลอ้อน, 41211001",
+                            key="parts_search_kw"
+                        )
+                        
+                        display_parts_df = preview_parts.copy()
+                        if parts_search_kw.strip():
+                            pkw = parts_search_kw.strip().lower()
+                            pmask = (
+                                display_parts_df["Invoice"].astype(str).str.lower().str.contains(pkw, na=False) |
+                                display_parts_df["Narrative"].astype(str).str.lower().str.contains(pkw, na=False) |
+                                display_parts_df["Subaccount"].astype(str).str.lower().str.contains(pkw, na=False) |
+                                display_parts_df["GL Code"].astype(str).str.lower().str.contains(pkw, na=False) |
+                                display_parts_df["Row Type"].astype(str).str.lower().str.contains(pkw, na=False)
+                            )
+                            display_parts_df = display_parts_df[pmask]
+                            
+                        st.dataframe(display_parts_df, use_container_width=True, height=450)
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการประมวลผลขายอะไหล่: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+        else:
+            st.info("💡 กรุณาอัปโหลดไฟล์รายงานการขายอะไหล่ (.xlsx) ด้านบนเพื่อเริ่มต้นแปลงข้อมูลขายอะไหล่หน้าร้าน")
 
 # =============================================================================
 # TAB 2: VEHICLE SALES INTERFACE (0XD / 0XDC / 0XWG / 0XWGCN)
