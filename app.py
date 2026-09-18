@@ -1924,10 +1924,10 @@ with tab_aftersales:
 # =============================================================================
 with tab_sales:
     # -------------------------------------------------------------------------
-    # 1. MANDATORY INPUTS (3 FILES)
+    # 1. MANDATORY INPUTS (2 FILES)
     # -------------------------------------------------------------------------
-    st.markdown("### 🔴 ไฟล์จำเป็น (Mandatory Inputs - ต้องใช้ทั้ง 3 ไฟล์)")
-    col_m1, col_m2, col_m3 = st.columns(3)
+    st.markdown("### 🔴 ไฟล์จำเป็น (Mandatory Inputs - ใช้เพียง 2 ไฟล์)")
+    col_m1, col_m2 = st.columns(2)
     with col_m1:
         st.markdown("**1. รายงานภาษีขาย (Sales VAT Report)**")
         st.caption("เช่น `2026VatReport(AllBranch).xlsx` *จำเป็น")
@@ -1937,31 +1937,23 @@ with tab_sales:
             key="sales_vat_upload"
         )
     with col_m2:
-        st.markdown("**2. บัญชีแยกประเภททั่วไป (General GL)**")
-        st.caption("เช่น `บัญชีแยกประเภท2026.xlsx` *จำเป็น")
+        st.markdown("**2. บัญชีแยกประเภททุกหมวด (All Category GL Report)**")
+        st.caption("เช่น `บัญชีแยกประเภท2026(AllCategory).xlsx` (ไฟล์เดียวครอบคลุมจัดหมวดบิล 0XD และดึงต้นทุน/สต๊อก/VIN บิล 0XWG ครบ 100%) *จำเป็น")
         gl_file = st.file_uploader(
-            "เลือกไฟล์บัญชีแยกประเภททั่วไป (.xlsx / .xls)", 
+            "เลือกไฟล์บัญชีแยกประเภททุกหมวด (.xlsx / .xls)", 
             type=["xlsx", "xls"], 
             key="sales_gl_upload"
-        )
-    with col_m3:
-        st.markdown("**3. บัญชีแยกประเภทรถยนต์ (Vehicle GL)**")
-        st.caption("เช่น `บัญชีแยกประเภท2026(Vehicle).xlsx` *จำเป็น")
-        veh_gl_file = st.file_uploader(
-            "เลือกไฟล์บัญชีแยกประเภทรถยนต์ (.xlsx / .xls)", 
-            type=["xlsx", "xls"], 
-            key="sales_veh_gl_upload"
         )
         
     # -------------------------------------------------------------------------
     # 2. OPTIONAL INPUTS (2 FILES)
     # -------------------------------------------------------------------------
     st.markdown("### 🟡 ไฟล์เสริม (Optional Inputs)")
-    st.caption("เสริมข้อมูลเพื่อดึงเลขสต๊อก (Stock No), เลขตัวถัง (VIN) และต้นทุนรถยนต์ให้ครบถ้วน 96%+ (หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)")
-    with st.expander("📁 อัปโหลดไฟล์เสริม (VehicleProfit / StockNumber)", expanded=True):
+    st.caption("เสริมข้อมูลเพื่อดึงเลขสต๊อก (Stock No), เลขตัวถัง (VIN) และต้นทุนรถยนต์เพิ่มเติม (หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)")
+    with st.expander("📁 อัปโหลดไฟล์เสริม (VehicleProfit / StockNumber)", expanded=False):
         col_o1, col_o2 = st.columns(2)
         with col_o1:
-            st.markdown("**4. รายงานกำไรการขายรถ (Vehicle Profit Report)**")
+            st.markdown("**3. รายงานกำไรการขายรถ (Vehicle Profit Report)**")
             st.caption("เช่น `VehicleProfit2026(AllBranch).xlsx` (ช่วยกู้คืนต้นทุนรถ, เลขสต๊อก, และ VIN)")
             profit_file = st.file_uploader(
                 "เลือกไฟล์รายงานกำไรการขายรถ (.xlsx / .xls)", 
@@ -1969,7 +1961,7 @@ with tab_sales:
                 key="sales_profit_upload"
             )
         with col_o2:
-            st.markdown("**5. รายงานเลขสต๊อกรถยนต์ (Stock Number Report)**")
+            st.markdown("**4. รายงานเลขสต๊อกรถยนต์ (Stock Number Report)**")
             st.caption("เช่น `StockNumber2026.xlsx` (ช่วยแมปเลขสต๊อกและ VIN เพิ่มเติม)")
             stock_file = st.file_uploader(
                 "เลือกไฟล์เลขสต๊อกรถยนต์ (.xlsx / .xls)", 
@@ -2022,12 +2014,18 @@ with tab_sales:
     # -------------------------------------------------------------------------
     # 4. PROCESSING LOGIC
     # -------------------------------------------------------------------------
-    if vat_file and gl_file and veh_gl_file:
+    if vat_file and gl_file:
         try:
             with st.spinner("กำลังประมวลผลข้อมูลฝ่ายขาย แมปต้นทุน และจัดหมวดหมู่อัตโนมัติ..."):
                 df_vat_sales = load_sales_vat_report(vat_file)
+                
+                # 1. Load General GL descriptions for 0XD / 0XDC bills
                 gl_dict_sales = load_gl_descriptions(gl_file)
-                veh_gl_dict_sales = load_vehicle_gl_cogs(veh_gl_file)
+                
+                # 2. Reset stream and load Vehicle GL COGS for 0XWG / 0XWGCN bills from AllCategory
+                if hasattr(gl_file, "seek"):
+                    gl_file.seek(0)
+                veh_gl_dict_sales = load_vehicle_gl_cogs(gl_file)
                 
                 # Optional Profit file (User upload or local workspace fallback)
                 profit_dict_sales = None
@@ -2384,12 +2382,10 @@ with tab_sales:
         if not vat_file:
             missing_m.append("1. รายงานภาษีขาย (Sales VAT Report)")
         if not gl_file:
-            missing_m.append("2. บัญชีแยกประเภททั่วไป (General GL Report)")
-        if not veh_gl_file:
-            missing_m.append("3. บัญชีแยกประเภทรถยนต์ (Vehicle GL Report)")
+            missing_m.append("2. บัญชีแยกประเภททุกหมวด (All Category GL Report)")
             
         st.info(
-            "💡 กรุณาอัปโหลด **ไฟล์จำเป็น (Mandatory Inputs)** ให้ครบทั้ง 3 ไฟล์ด้านบนเพื่อเริ่มต้นแปลงข้อมูลฝ่ายขาย:\n" +
+            "💡 กรุณาอัปโหลด **ไฟล์จำเป็น (Mandatory Inputs)** ทั้ง 2 ไฟล์ด้านบนเพื่อเริ่มต้นแปลงข้อมูลฝ่ายขาย:\n" +
             "\n".join([f"- {m}" for m in missing_m])
         )
 
