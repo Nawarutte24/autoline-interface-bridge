@@ -1440,8 +1440,6 @@ FINANCE_KEYWORDS = [
 
 def resolve_sales_branch(invoice_number):
     inv_str = str(invoice_number or "").strip()
-    if len(inv_str) >= 2 and inv_str[:2].isdigit():
-        return f"00{inv_str[:2]}"
     if inv_str.startswith("02"):
         return "0002"
     return "0001"
@@ -1481,75 +1479,86 @@ def classify_description_text(desc):
         
     return 'DEPOSIT'
 
-def load_sales_vat_report(file_or_path):
-    wb = openpyxl.load_workbook(file_or_path, data_only=True)
-    ws = wb.active
-    
+def load_sales_vat_report(file_or_files):
+    if not isinstance(file_or_files, (list, tuple)):
+        file_list = [file_or_files]
+    else:
+        file_list = file_or_files
+
     records = []
-    target_prefixes = ('01D', '02D', '01DC', '02DC', '01WG', '02WG')
-    
-    for r in range(2, ws.max_row + 1):
-        seq = ws.cell(row=r, column=1).value
-        inv = ws.cell(row=r, column=2).value
-        
-        if inv is None or str(seq).strip() in ['รวม', 'Total'] or str(inv).strip() in ['รวม', 'Total']:
-            continue
-            
-        inv_str = str(inv).strip()
-        
-        if not inv_str.startswith(target_prefixes):
-            continue
-            
-        if inv_str.startswith(('HA', 'CA')):
-            continue
-            
-        dt_val = ws.cell(row=r, column=3).value
-        cust_name = str(ws.cell(row=r, column=4).value or '').strip()
-        tax_id = str(ws.cell(row=r, column=5).value or '').strip()
-        
-        net_val = ws.cell(row=r, column=7).value
-        vat_val = ws.cell(row=r, column=8).value
-        gross_val = ws.cell(row=r, column=9).value
-        
-        try:
-            f_net = float(net_val) if net_val is not None else 0.0
-            f_vat = float(vat_val) if vat_val is not None else 0.0
-            f_gross = float(gross_val) if gross_val is not None else 0.0
-        except (ValueError, TypeError):
-            continue
-            
-        if f_net == 0.0 and f_vat == 0.0 and f_gross == 0.0:
-            continue
-            
-        parsed_date = None
-        if dt_val:
-            if isinstance(dt_val, (datetime.date, datetime.datetime)):
-                parsed_date = dt_val
-            else:
-                parts = str(dt_val).strip().split('/')
-                if len(parts) == 3:
-                    try:
-                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-                        year = 2000 + y if y < 100 else y
-                        parsed_date = datetime.datetime(year, m, d)
-                    except:
-                        pass
-        if not parsed_date:
-            parsed_date = datetime.datetime.now()
-            
-        records.append({
-            "seq": seq,
-            "invoice_number": inv_str,
-            "doc_date": parsed_date,
-            "doc_date_str": parsed_date.strftime("%d/%m/%y"),
-            "customer_name": cust_name,
-            "tax_id": tax_id,
-            "net_amount": f_net,
-            "vat_amount": f_vat,
-            "gross_amount": f_gross,
-            "is_credit_note": (f_net < 0 or 'DC' in inv_str or 'WGCN' in inv_str)
-        })
-        
+    seen_invoices = set()
+    target_prefixes = tuple(f"{b:02d}{p}" for b in range(1, 10) for p in ['D', 'DC', 'WG', 'WGCN']) + ('HD',)
+
+    for f in file_list:
+        wb = openpyxl.load_workbook(f, data_only=True)
+        ws = wb.active
+
+        for r in range(2, ws.max_row + 1):
+            seq = ws.cell(row=r, column=1).value
+            inv = ws.cell(row=r, column=2).value
+
+            if inv is None or str(seq).strip() in ['รวม', 'Total'] or str(inv).strip() in ['รวม', 'Total']:
+                continue
+
+            inv_str = str(inv).strip()
+
+            if not inv_str.startswith(target_prefixes):
+                continue
+
+            if inv_str.startswith(('HA', 'CA')):
+                continue
+
+            if inv_str in seen_invoices:
+                continue
+
+            dt_val = ws.cell(row=r, column=3).value
+            cust_name = str(ws.cell(row=r, column=4).value or '').strip()
+            tax_id = str(ws.cell(row=r, column=5).value or '').strip()
+
+            net_val = ws.cell(row=r, column=7).value
+            vat_val = ws.cell(row=r, column=8).value
+            gross_val = ws.cell(row=r, column=9).value
+
+            try:
+                f_net = float(net_val) if net_val is not None else 0.0
+                f_vat = float(vat_val) if vat_val is not None else 0.0
+                f_gross = float(gross_val) if gross_val is not None else 0.0
+            except (ValueError, TypeError):
+                continue
+
+            if f_net == 0.0 and f_vat == 0.0 and f_gross == 0.0:
+                continue
+
+            parsed_date = None
+            if dt_val:
+                if isinstance(dt_val, (datetime.date, datetime.datetime)):
+                    parsed_date = dt_val
+                else:
+                    parts = str(dt_val).strip().split('/')
+                    if len(parts) == 3:
+                        try:
+                            d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                            year = 2000 + y if y < 100 else y
+                            parsed_date = datetime.datetime(year, m, d)
+                        except:
+                            pass
+            if not parsed_date:
+                parsed_date = datetime.datetime.now()
+
+            seen_invoices.add(inv_str)
+            records.append({
+                "seq": seq,
+                "invoice_number": inv_str,
+                "doc_date": parsed_date,
+                "doc_date_str": parsed_date.strftime("%d/%m/%y"),
+                "customer_name": cust_name,
+                "tax_id": tax_id,
+                "net_amount": f_net,
+                "vat_amount": f_vat,
+                "gross_amount": f_gross,
+                "is_credit_note": (f_net < 0 or 'DC' in inv_str or 'WGCN' in inv_str)
+            })
+
     return pd.DataFrame(records)
 
 def load_gl_descriptions(file_or_path):
@@ -1905,7 +1914,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         b_batch_idx = branch_batches[branch]
         g_batch_idx = global_batch_idx
         
-        is_wg = inv_no.startswith(('01WG', '02WG', '03WG', '04WG'))
+        is_wg = 'WG' in inv_no
         doc_group = "0XWG" if is_wg else "0XD"
         doc_type_batches[doc_group] += 1
         dt_batch_idx = doc_type_batches[doc_group]
@@ -1924,7 +1933,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         doc_seq = "SCREDITV" if is_cn else "SINVOICV"
         
         gl_lines = gl_dict.get(inv_no, [])
-        if not gl_lines and (inv_no.startswith(('01D', '02D', '01DC', '02DC'))):
+        if not gl_lines and not is_wg:
             unmatched_gl_count += 1
             
         # Fixed Defaults as required by Autoline constraints
@@ -2320,7 +2329,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 gaps.append("ไม่พบรหัสไฟแนนซ์เฉพาะ")
                 gap_details.append("ใช้ Subaccount กลางเป็น ARCODE FINANCE")
         else:
-            if not gl_lines and inv_no.startswith(('01D', '02D', '01DC', '02DC', '03D', '04D')):
+            if not gl_lines and not is_wg:
                 gaps.append("ไม่พบในรายงาน GL ทั่วไป")
                 gap_details.append("ใช้หมวดเริ่มต้นเป็นเงินจอง (GL 21311003 แผนก 0000)")
             if subaccount == "ARCODE FINANCE":
@@ -2816,10 +2825,11 @@ with tab_sales:
     col_m1, col_m2 = st.columns(2)
     with col_m1:
         st.markdown("**1. รายงานภาษีขาย (Sales VAT Report)**")
-        st.caption("เช่น `2026VatReport(AllBranch).xlsx` *จำเป็น")
-        vat_file = st.file_uploader(
-            "เลือกไฟล์รายงานภาษีขาย (.xlsx / .xls)", 
+        st.caption("เช่น `2026VatReport(Branch1.1).xlsx`... (รองรับเลือกหลายไฟล์พร้อมกันเพื่อรวมทุกสาขา) *จำเป็น")
+        vat_files = st.file_uploader(
+            "เลือกไฟล์รายงานภาษีขาย (.xlsx / .xls) (เลือกได้หลายไฟล์พร้อมกัน)", 
             type=["xlsx", "xls"], 
+            accept_multiple_files=True,
             key="sales_vat_upload"
         )
     with col_m2:
@@ -2900,10 +2910,10 @@ with tab_sales:
     # -------------------------------------------------------------------------
     # 4. PROCESSING LOGIC
     # -------------------------------------------------------------------------
-    if vat_file and gl_file:
+    if vat_files and gl_file:
         try:
             with st.spinner("กำลังประมวลผลข้อมูลฝ่ายขาย แมปต้นทุน และจัดหมวดหมู่อัตโนมัติ..."):
-                df_vat_sales = load_sales_vat_report(vat_file)
+                df_vat_sales = load_sales_vat_report(vat_files)
                 
                 # 1. Load General GL descriptions for 0XD / 0XDC bills
                 gl_dict_sales = load_gl_descriptions(gl_file)
@@ -3265,7 +3275,7 @@ with tab_sales:
     else:
         # Clear feedback for missing mandatory files
         missing_m = []
-        if not vat_file:
+        if not vat_files:
             missing_m.append("1. รายงานภาษีขาย (Sales VAT Report)")
         if not gl_file:
             missing_m.append("2. บัญชีแยกประเภททุกหมวด (All Category GL Report)")
