@@ -997,8 +997,10 @@ def parse_parts_sales_file(file_obj_or_path):
                 doc_date = datetime.date.today()
                 
             branch = current_branch_code
-            if inv_no.startswith("01"): branch = "0001"
-            elif inv_no.startswith("02"): branch = "0002"
+            if inv_no.startswith("02"):
+                branch = "0002"
+            elif inv_no.startswith(("01", "03", "04", "05")):
+                branch = "0001"
             
             if inv_no not in invoices:
                 invoices[inv_no] = {
@@ -1330,6 +1332,7 @@ def transform_parts_sales_to_autoline(invoices_dict, config=None):
         "difference": round(abs((total_debit_sum - total_credit_sum) - (inv_tax - cn_tax)), 2)
     }
     
+    summary_stats["by_branch"] = split_rows_by_branch(rows_to_write)
     return rows_to_write, summary_stats, pd.DataFrame(preview_records)
 
 
@@ -2687,33 +2690,102 @@ with tab_aftersales:
                         else:
                             kp6.metric("สถานะดุลบัญชี", "พบผลต่าง ⚠️", delta=f"{stats_parts['difference']:,.2f} บาท")
                             
-                        # Download Section
+                        # Download Section (Parts Sales แยกตามสาขา Autoline: 0001 และ 0002)
                         st.markdown("---")
-                        col_pdl1, col_pdl2 = st.columns([2, 1])
+                        st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (Parts Sales - แยกตามสาขา)")
+                        st.caption("โครงสร้าง Autoline AR Journal Import แบ่งตามสาขา: สาขา 01, 03, 04, 05 เข้า **Branch 0001** และ สาขา 02 เข้า **Branch 0002**")
+
+                        by_branch_parts = stats_parts.get("by_branch", {})
+                        now_p_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                        pb1_data = by_branch_parts.get("0001", {"rows": [], "total_documents": 0})
+                        pb2_data = by_branch_parts.get("0002", {"rows": [], "total_documents": 0})
+                        pb1_count = pb1_data["total_documents"]
+                        pb2_count = pb2_data["total_documents"]
+
+                        col_pdl1, col_pdl2, col_pdl3, col_pdl4 = st.columns(4)
+                        excel_pb1 = None
+                        excel_pb2 = None
+
                         with col_pdl1:
-                            st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (Parts Sales)")
-                            st.caption("ไฟล์ Excel ในโครงสร้าง Autoline AR Journal Import (รองรับทั้งบิลขาย ARI และใบลดหนี้ ARC พร้อมบันทึกต้นทุนและสต็อก)")
+                            if pb1_count > 0:
+                                excel_pb1 = generate_output_excel(template_path, pb1_data["rows"])
+                                st.download_button(
+                                    label=f"🏢 Branch 0001 ({pb1_count:,} ใบ)\n(สาขา 01, 03, 04, 05)",
+                                    data=excel_pb1,
+                                    file_name=f"Autoline_Import_PARTS_BRANCH0001_{now_p_str}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key="dl_parts_b1",
+                                    use_container_width=True
+                                )
+                            else:
+                                st.button("🏢 Branch 0001 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_parts_b1")
+
                         with col_pdl2:
+                            if pb2_count > 0:
+                                excel_pb2 = generate_output_excel(template_path, pb2_data["rows"])
+                                st.download_button(
+                                    label=f"🏢 Branch 0002 ({pb2_count:,} ใบ)\n(สาขา 02 - เกษตรนวมินทร์)",
+                                    data=excel_pb2,
+                                    file_name=f"Autoline_Import_PARTS_BRANCH0002_{now_p_str}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key="dl_parts_b2",
+                                    use_container_width=True
+                                )
+                            else:
+                                st.button("🏢 Branch 0002 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_parts_b2")
+
+                        with col_pdl3:
                             excel_parts_output = generate_output_excel(template_path, rows_parts)
-                            now_p_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                             st.download_button(
-                                label="⬇️ ดาวน์โหลด Autoline_Import_PARTS.xlsx",
+                                label=f"📦 โหลดรวมทุกสาขา ({pb1_count + pb2_count:,} ใบ)\n(All Combined)",
                                 data=excel_parts_output,
-                                file_name=f"Autoline_Import_PARTS_{now_p_str}.xlsx",
+                                file_name=f"Autoline_Import_PARTS_ALL_{now_p_str}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key="dl_parts_excel_btn",
+                                key="dl_parts_all",
                                 use_container_width=True
                             )
-                            
+
+                        with col_pdl4:
+                            import zipfile
+                            pzip_buf = BytesIO()
+                            with zipfile.ZipFile(pzip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                                if excel_pb1 is not None:
+                                    zf.writestr(f"Autoline_Import_PARTS_BRANCH0001_{now_p_str}.xlsx", excel_pb1.getvalue())
+                                if excel_pb2 is not None:
+                                    zf.writestr(f"Autoline_Import_PARTS_BRANCH0002_{now_p_str}.xlsx", excel_pb2.getvalue())
+                            pzip_buf.seek(0)
+                            st.download_button(
+                                label=f"🗂️ ดาวน์โหลด (ZIP)\n(รวมไฟล์แยก 0001 & 0002)",
+                                data=pzip_buf,
+                                file_name=f"Autoline_Import_PARTS_BRANCHES_{now_p_str}.zip",
+                                mime="application/zip",
+                                key="dl_parts_zip",
+                                use_container_width=True
+                            )
+
                         # Data Preview
                         st.markdown("### 🔍 ตรวจสอบข้อมูลรายการขายอะไหล่ (Parts Data Preview)")
-                        parts_search_kw = st.text_input(
-                            "ค้นหาเอกสาร (เลขที่บิล, ชื่อลูกค้า, รหัส GL, Subaccount หรือ Narrative)",
-                            placeholder="เช่น 01P26030001, 01PC, MMS, ไลอ้อน, 41211001",
-                            key="parts_search_kw"
-                        )
-                        
+                        col_ppf1, col_ppf2 = st.columns([1, 2])
+                        with col_ppf1:
+                            parts_branch_filter = st.selectbox(
+                                "กรองตามสาขา Autoline",
+                                ["ทุกสาขา (All)", f"Branch 0001 (สาขา 01, 03, 04, 05: {pb1_count:,} ใบ)", f"Branch 0002 (สาขา 02: {pb2_count:,} ใบ)"],
+                                key="parts_branch_filter"
+                            )
+                        with col_ppf2:
+                            parts_search_kw = st.text_input(
+                                "ค้นหาเอกสาร (เลขที่บิล, ชื่อลูกค้า, รหัส GL, Subaccount หรือ Narrative)",
+                                placeholder="เช่น 01P26030001, 01PC, MMS, ไลอ้อน, 41211001",
+                                key="parts_search_kw"
+                            )
+
                         display_parts_df = preview_parts.copy()
+                        if "Branch 0001" in parts_branch_filter:
+                            display_parts_df = display_parts_df[display_parts_df["Branch"] == "0001"]
+                        elif "Branch 0002" in parts_branch_filter:
+                            display_parts_df = display_parts_df[display_parts_df["Branch"] == "0002"]
+
                         if parts_search_kw.strip():
                             pkw = parts_search_kw.strip().lower()
                             pmask = (
