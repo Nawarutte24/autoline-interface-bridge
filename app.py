@@ -917,7 +917,7 @@ def generate_output_excel(template_path, rows_to_write):
                 cell.value = val
                 
                 if hasattr(val, "strftime"):
-                    cell.number_format = "yyyy-mm-dd"
+                    cell.number_format = "d/m/yyyy"
                 elif isinstance(val, (int, float)) and col_letter in ["I", "J", "M", "N"]:
                     cell.number_format = "#,##0.00"
                 elif col_letter == "Y" and val is not None:
