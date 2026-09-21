@@ -440,45 +440,86 @@ def transform_to_autoline_data(df_header, df_detail):
         
         cat_sales = {}
         if not d_group.empty:
-            cat_sums = d_group.groupby("category")["sales"].sum().to_dict()
-            cat_tax_sums = d_group.groupby("category")["sales_tax"].sum().to_dict()
-            
-            valid_cats = {k: v for k, v in cat_sums.items() if v > 0 and k in ["P", "L", "S", "C"]}
-            valid_tax_cats = {k: v for k, v in cat_tax_sums.items() if v > 0 and k in ["P", "L", "S", "C"]}
-            
-            # Map C -> S (Sublet)
-            target_tax = {}
-            for k, v in valid_tax_cats.items():
-                mapped_k = "S" if k == "C" else k
-                target_tax[mapped_k] = target_tax.get(mapped_k, 0.0) + v
-                
-            target_cats = {}
-            for k, v in valid_cats.items():
-                mapped_k = "S" if k == "C" else k
-                target_cats[mapped_k] = target_cats.get(mapped_k, 0.0) + v
-            
-            if len(target_cats) == 1:
-                cat_name = list(target_cats.keys())[0]
-                cat_sales[cat_name] = doc_nett
-            elif len(target_cats) > 1:
-                tot_tax = sum(target_tax.values())
-                if tot_tax > 0:
-                    allocated = 0.0
-                    c_list = list(target_tax.keys())
-                    for c in c_list[:-1]:
-                        c_amt = round(doc_nett * (target_tax[c] / tot_tax), 2)
-                        cat_sales[c] = c_amt
-                        allocated += c_amt
-                    cat_sales[c_list[-1]] = round(doc_nett - allocated, 2)
+            cat_sales_raw = {}
+            cat_disc_raw = {}
+            cat_nett_raw = {}
+            cat_tax_raw = {}
+
+            for _, d_row in d_group.iterrows():
+                c_raw = str(d_row.get("category", "")).strip().upper()
+                if c_raw in ["P", "L", "S", "C"]:
+                    c = "S" if c_raw == "C" else c_raw
+                    s_val = abs(float(d_row.get("sales", 0.0) or 0.0))
+                    disc_val = abs(float(d_row.get("discount_amount", 0.0) or 0.0))
+                    nett_val = abs(float(d_row.get("nett_price", 0.0) or 0.0))
+                    tax_val = abs(float(d_row.get("sales_tax", 0.0) or 0.0))
+                    
+                    cat_sales_raw[c] = cat_sales_raw.get(c, 0.0) + s_val
+                    cat_disc_raw[c] = cat_disc_raw.get(c, 0.0) + disc_val
+                    cat_nett_raw[c] = cat_nett_raw.get(c, 0.0) + nett_val
+                    cat_tax_raw[c] = cat_tax_raw.get(c, 0.0) + tax_val
+
+            active_cats = [c for c in ["P", "L", "S"] if cat_sales_raw.get(c, 0.0) > 0 or cat_nett_raw.get(c, 0.0) > 0]
+            disc_cats = [c for c in active_cats if abs(cat_disc_raw.get(c, 0.0)) > 0.001]
+            non_disc_cats = [c for c in active_cats if abs(cat_disc_raw.get(c, 0.0)) <= 0.001]
+
+            if len(active_cats) == 1:
+                cat_sales[active_cats[0]] = doc_nett
+            elif len(disc_cats) > 0 and len(non_disc_cats) > 0:
+                # Category-Specific Discount Attribution: Non-discounted categories get full sales price
+                sum_non_disc = sum(round(cat_sales_raw[c], 2) for c in non_disc_cats)
+                rem_net = round(doc_nett - sum_non_disc, 2)
+                if rem_net > 0:
+                    for c in non_disc_cats:
+                        cat_sales[c] = round(cat_sales_raw[c], 2)
+                    if len(disc_cats) == 1:
+                        cat_sales[disc_cats[0]] = rem_net
+                    else:
+                        tot_disc_nett = sum(cat_nett_raw[c] for c in disc_cats)
+                        if tot_disc_nett > 0:
+                            alloc = 0.0
+                            for c in disc_cats[:-1]:
+                                c_amt = round(rem_net * (cat_nett_raw[c] / tot_disc_nett), 2)
+                                cat_sales[c] = c_amt
+                                alloc += c_amt
+                            cat_sales[disc_cats[-1]] = round(rem_net - alloc, 2)
+                        else:
+                            cat_sales[disc_cats[0]] = rem_net
                 else:
-                    tot_s = sum(target_cats.values())
-                    allocated = 0.0
-                    c_list = list(target_cats.keys())
-                    for c in c_list[:-1]:
-                        c_amt = round(doc_nett * (target_cats[c] / tot_s), 2)
+                    tot_nett = sum(cat_nett_raw[c] for c in active_cats)
+                    if tot_nett > 0:
+                        alloc = 0.0
+                        for c in active_cats[:-1]:
+                            c_amt = round(doc_nett * (cat_nett_raw[c] / tot_nett), 2)
+                            cat_sales[c] = c_amt
+                            alloc += c_amt
+                        cat_sales[active_cats[-1]] = round(doc_nett - alloc, 2)
+                    else:
+                        cat_sales[active_cats[0]] = doc_nett
+            elif len(disc_cats) == len(active_cats):
+                # All categories have discount: allocate proportionally by nett_price
+                tot_nett = sum(cat_nett_raw[c] for c in active_cats)
+                if tot_nett > 0:
+                    alloc = 0.0
+                    for c in active_cats[:-1]:
+                        c_amt = round(doc_nett * (cat_nett_raw[c] / tot_nett), 2)
                         cat_sales[c] = c_amt
-                        allocated += c_amt
-                    cat_sales[c_list[-1]] = round(doc_nett - allocated, 2)
+                        alloc += c_amt
+                    cat_sales[active_cats[-1]] = round(doc_nett - alloc, 2)
+                else:
+                    cat_sales[active_cats[0]] = doc_nett
+            else:
+                # No category has discount: allocate proportionally by sales
+                tot_s = sum(cat_sales_raw[c] for c in active_cats)
+                if tot_s > 0:
+                    alloc = 0.0
+                    for c in active_cats[:-1]:
+                        c_amt = round(doc_nett * (cat_sales_raw[c] / tot_s), 2)
+                        cat_sales[c] = c_amt
+                        alloc += c_amt
+                    cat_sales[active_cats[-1]] = round(doc_nett - alloc, 2)
+                else:
+                    cat_sales[active_cats[0]] = doc_nett
                     
         # Fallback to Header parts_amount / labor_amount / other_amount
         if not cat_sales:
