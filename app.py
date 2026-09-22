@@ -445,7 +445,11 @@ def transform_to_autoline_data(df_header, df_detail):
             cat_nett_raw = {}
             cat_tax_raw = {}
 
+            has_lfr20sc = False
             for _, d_row in d_group.iterrows():
+                p_code = str(d_row.get("product_code", "")).strip().upper()
+                if p_code == "LFR20SC":
+                    has_lfr20sc = True
                 c_raw = str(d_row.get("category", "")).strip().upper()
                 if c_raw in ["P", "L", "S", "C"]:
                     c = "S" if c_raw == "C" else c_raw
@@ -459,6 +463,11 @@ def transform_to_autoline_data(df_header, df_detail):
                     cat_nett_raw[c] = cat_nett_raw.get(c, 0.0) + nett_val
                     cat_tax_raw[c] = cat_tax_raw.get(c, 0.0) + tax_val
 
+            # Special Rule: LFR20SC campaign discount 350 THB is dedicated 100% to Labor
+            if has_lfr20sc:
+                cat_disc_raw["L"] = cat_disc_raw.get("L", 0.0) + 350.0
+                cat_nett_raw["L"] = max(0.0, cat_nett_raw.get("L", 0.0) - 350.0)
+
             active_cats = [c for c in ["P", "L", "S"] if cat_sales_raw.get(c, 0.0) > 0 or cat_nett_raw.get(c, 0.0) > 0]
             disc_cats = [c for c in active_cats if abs(cat_disc_raw.get(c, 0.0)) > 0.001]
             non_disc_cats = [c for c in active_cats if abs(cat_disc_raw.get(c, 0.0)) <= 0.001]
@@ -469,7 +478,7 @@ def transform_to_autoline_data(df_header, df_detail):
                 # Category-Specific Discount Attribution: Non-discounted categories get full sales price
                 sum_non_disc = sum(round(cat_sales_raw[c], 2) for c in non_disc_cats)
                 rem_net = round(doc_nett - sum_non_disc, 2)
-                if rem_net > 0:
+                if rem_net >= 0:
                     for c in non_disc_cats:
                         cat_sales[c] = round(cat_sales_raw[c], 2)
                     if len(disc_cats) == 1:
