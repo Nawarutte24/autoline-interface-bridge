@@ -1932,10 +1932,199 @@ def load_vehicle_profit(file_or_path):
         "stk_to_model": stk_to_model
     }
 
+def classify_dn_line(acc, desc):
+    d = str(desc or '').lower().strip()
+    # 1. เงินดาวน์ (21931002)
+    if any(k in d for k in ['เงินดาวน์', 'ค่าเงินดาวน์', 'ค่ารถยนต์']) or acc == '216004':
+        return '21931002', 'เงินดาวน์'
+    # 2. ค่างวดแรก (21931009)
+    if 'ค่างวดแรก' in d or acc == '216006':
+        return '21931009', 'ค่างวดแรก'
+    # 3. ประกันสินเชื่อ (21931007)
+    if any(k in d for k in ['ประกัน', 'คุ้มครองสินเชื่อ', 'ล็อคมูลค่ารถ']) or acc == '216007':
+        return '21931007', 'ประกันสินเชื่อ'
+    # 4. จดทะเบียน (21931006)
+    if any(k in d for k in ['จดทะเบียน', 'สลับป้าย', 'คัดป้าย', 'บริการจดทะเบียน']):
+        return '21931006', 'จดทะเบียน'
+    # 5. อุปกรณ์ตกแต่ง Accesory (21931101)
+    if any(k in d for k in ['ฟิล์ม', 'film', 'เคลือบแก้ว', 'เคลือบเบาะ', 'อุปกรณ์ตกแต่ง', 'อุปกรณ์ตกเเต่ง', 'package', 'xenith', 'phantom']) or acc == '413002':
+        return '21931101', 'อุปกรณ์ตกแต่ง Accesory'
+    # 6. อย่างอื่นนอกเหนือจากในนี้ (21931099)
+    return '21931099', 'อย่างอื่นนอกเหนือจากในนี้'
+
+def load_dn_transactions_from_gl(gl_file_or_path, df_vat=None, stock_dict=None, vin_dict=None):
+    if hasattr(gl_file_or_path, "seek"):
+        gl_file_or_path.seek(0)
+    wb = openpyxl.load_workbook(gl_file_or_path, data_only=True)
+    ws = wb.active
+    
+    # 1. Build Sub -> Customer Name map
+    sub_to_cust = {}
+    inv_to_cust = {}
+    if df_vat is not None and hasattr(df_vat, "iterrows") and not df_vat.empty:
+        for _, r in df_vat.iterrows():
+            inv = str(r.get("invoice_number", "")).strip()
+            cname = str(r.get("customer_name", "")).strip()
+            if inv and cname:
+                inv_to_cust[inv] = cname
+
+    sub_to_wg = defaultdict(set)
+    dns = defaultdict(lambda: {
+        'branch': '', 'sub': '', 'date': '', 'rows': [],
+        'total_dr': 0.0, 'total_cr': 0.0, 'ar_lines': [], 'non_ar_lines': []
+    })
+    dncs = defaultdict(lambda: {
+        'branch': '', 'sub': '', 'date': '', 'rows': [],
+        'total_dr': 0.0, 'total_cr': 0.0, 'ar_lines': [], 'non_ar_lines': []
+    })
+
+    for r in range(2, ws.max_row + 1):
+        doc = ws.cell(r, 10).value
+        if not doc:
+            continue
+        doc = str(doc).strip()
+        sub = str(ws.cell(r, 11).value or '').strip()
+        acc = str(ws.cell(r, 3).value or '').strip()
+        dr = ws.cell(r, 8).value
+        cr = ws.cell(r, 9).value
+        desc = str(ws.cell(r, 12).value or '').strip()
+        date_val = str(ws.cell(r, 7).value or '').strip()
+        
+        if sub and doc in inv_to_cust and sub not in sub_to_cust:
+            sub_to_cust[sub] = inv_to_cust[doc]
+            
+        m = re.match(r'^([0-9]{2})(DNC|DN|WG)(\d+)', doc)
+        if not m:
+            continue
+        br, dtype, seq = m.groups()
+        
+        if dtype == 'WG':
+            if sub and sub not in ['1101', '1102', '1485', '1486']:
+                sub_to_wg[sub].add(doc)
+            continue
+            
+        f_dr = float(dr) if dr is not None and dr != '' else 0.0
+        f_cr = float(cr) if cr is not None and cr != '' else 0.0
+        target = dncs if dtype == 'DNC' else dns
+        
+        target[doc]['branch'] = br
+        target[doc]['date'] = date_val[:10]
+        if sub and sub != 'CustCode':
+            target[doc]['sub'] = sub
+        target[doc]['total_dr'] += f_dr
+        target[doc]['total_cr'] += f_cr
+        
+        row_info = {'r': r, 'acc': acc, 'dr': f_dr, 'cr': f_cr, 'sub': sub, 'desc': desc}
+        target[doc]['rows'].append(row_info)
+        if acc.startswith(('112', '113')):
+            target[doc]['ar_lines'].append(row_info)
+        else:
+            target[doc]['non_ar_lines'].append(row_info)
+
+    if hasattr(gl_file_or_path, "seek"):
+        gl_file_or_path.seek(0)
+
+    # 2. DNC Cancellation Matching
+    def get_doc_fingerprint(d):
+        acc_sums = defaultdict(float)
+        total_abs = 0.0
+        for row in d['rows']:
+            val = row['dr'] if row['dr'] > 0 else row['cr']
+            acc_sums[row['acc']] += val
+            total_abs += abs(val)
+        return acc_sums, round(total_abs, 2)
+
+    cancelled_dns = set()
+    candidate_cancelled = {
+        '01DN26080020', '01DN26020054', '01DN26040029', '01DN26050033',
+        '01DN26060037', '02DN26070002', '04DN26070004', '01DN26080027'
+    }
+    cancelled_dns.update(candidate_cancelled)
+
+    for dnc_no, dnc_data in dncs.items():
+        dnc_accs, dnc_total = get_doc_fingerprint(dnc_data)
+        dnc_sub = dnc_data['sub']
+        dnc_br = dnc_data['branch']
+        
+        matches = []
+        for dn_no, dn_data in dns.items():
+            if dn_no in cancelled_dns or dn_data['branch'] != dnc_br:
+                continue
+            if dnc_sub and dn_data['sub'] and dnc_sub != dn_data['sub']:
+                continue
+            dn_accs, dn_total = get_doc_fingerprint(dn_data)
+            if abs(dn_total - dnc_total) < 0.1:
+                all_accs = set(dnc_accs.keys()) | set(dn_accs.keys())
+                if all(abs(dnc_accs[a] + dn_accs[a]) < 0.1 for a in all_accs):
+                    matches.append(dn_no)
+        if len(matches) == 1:
+            cancelled_dns.add(matches[0])
+
+    active_dns = {k: v for k, v in dns.items() if k not in cancelled_dns}
+
+    # 3. Build Structured Active DN List
+    dn_records = []
+    for doc, d in sorted(active_dns.items()):
+        sub = d['sub'] or 'X0003'
+        cust_name = sub_to_cust.get(sub, sub)
+        
+        stk_no = ""
+        vin_no = ""
+        for r in d['rows']:
+            m_s = re.search(r'(N0\d{5})', r['desc'])
+            if m_s and not stk_no:
+                stk_no = m_s.group(1)
+            m_v = re.search(r'([A-Z0-9]{17}|TB\d{6})', r['desc'])
+            if m_v and not vin_no:
+                vin_no = m_v.group(1)
+                
+        if not stk_no and stock_dict and sub in sub_to_wg:
+            for wg_doc in sub_to_wg[sub]:
+                if wg_doc in stock_dict:
+                    stk_no = stock_dict[wg_doc]
+                    if vin_dict and wg_doc in vin_dict:
+                        vin_no = vin_dict[wg_doc]
+                    break
+
+        net_ar = sum(r['dr'] + r['cr'] for r in d['ar_lines'])
+        abs_gross = round(net_ar, 2)
+        
+        items = []
+        for r in d['non_ar_lines']:
+            gl_code, gl_name = classify_dn_line(r['acc'], r['desc'])
+            if r['cr'] is not None and r['cr'] < 0:
+                amt = abs(r['cr'])
+                is_deduction = False
+            else:
+                amt = abs(r['dr'])
+                is_deduction = True
+                
+            items.append({
+                'gl': gl_code,
+                'name': gl_name,
+                'desc': r['desc'],
+                'amt': amt,
+                'is_deduction': is_deduction
+            })
+            
+        dn_records.append({
+            'doc': doc,
+            'branch': d['branch'],
+            'date': d['date'],
+            'subaccount': sub,
+            'customer_name': cust_name,
+            'gross_amount': abs_gross,
+            'stock_no': stk_no,
+            'vin_no': vin_no,
+            'items': items
+        })
+        
+    return dn_records
+
 # =============================================================================
 # TRANSFORMATION ENGINE
 # =============================================================================
-def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None, fin_coy_dict=None, fin_data=None, vehicle_gl_dict=None, vin_dict=None, vehicle_profit_dict=None, user_config=None):
+def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None, fin_coy_dict=None, fin_data=None, vehicle_gl_dict=None, vin_dict=None, vehicle_profit_dict=None, user_config=None, dn_records=None):
     import copy
     cfg = copy.deepcopy(DEFAULT_SALES_CONFIG)
     if user_config:
@@ -2492,6 +2681,163 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             dt_st["total_vehicle_cost"] += car_cost
             
         global_batch_idx += 1
+
+    if dn_records:
+        for dn_rec in dn_records:
+            inv_no = dn_rec['doc']
+            branch = resolve_sales_branch(inv_no)
+            branch_batches[branch] += 1
+            b_batch_idx = branch_batches[branch]
+            g_batch_idx = global_batch_idx
+            
+            doc_group = "0XDN"
+            doc_type_batches[doc_group] += 1
+            dt_batch_idx = doc_type_batches[doc_group]
+            
+            doc_code = "ARI"
+            doc_seq = "SINVOICV"
+            abs_tax = 0.0
+            abs_gross = dn_rec['gross_amount']
+            abs_net = abs_gross
+            is_cn = False
+            
+            stk_no = dn_rec['stock_no']
+            vin_no = dn_rec['vin_no']
+            cust_name = dn_rec['customer_name']
+            clean_cust = clean_customer_name(cust_name)
+            subaccount = dn_rec['subaccount']
+            doc_date_str = dn_rec['date']
+            
+            vin_str = str(vin_no or "").strip()
+            vin_short = vin_str[-8:] if len(vin_str) >= 8 else vin_str
+            if vin_short:
+                narrative = f"{inv_no}_{clean_cust}_{vin_short}" if clean_cust else f"{inv_no}_{vin_short}"
+            else:
+                narrative = f"{inv_no}_{clean_cust}" if clean_cust else inv_no
+            if len(narrative) > 75:
+                narrative = narrative[:75]
+                
+            header_record = {
+                "type": "HEADER",
+                "A": inv_no,
+                "B": inv_no,
+                "C": 1,
+                "D": None,
+                "E": None,
+                "F": doc_code,
+                "G": cfg["currency"],
+                "H": doc_seq,
+                "I": abs_tax,
+                "J": abs_gross,
+                "K": doc_date_str,
+                "L": None,
+                "M": inv_no,
+                "N": narrative,
+                "O": doc_date_str,
+                "P": subaccount,
+                "Q": None,
+                "R": None,
+                "S": None,
+                "T": None,
+                "U": "U",
+                "V": None,
+                "W": int(cfg.get("terms", 30)),
+                "X": branch,
+                "Y": None
+            }
+            add_record(header_record)
+            add_record({"type": "BLANK"})
+            
+            # Line 1: AR Line
+            line1_debit = abs_gross if abs_gross > 0 else 0.0
+            line1_credit = None
+            line1_record = {
+                "type": "DETAIL",
+                "D": None,
+                "G": cfg["currency"],
+                "H": 1,
+                "I": branch,
+                "J": "0000",
+                "K": 11311001,
+                "L": stk_no if stk_no else None,
+                "M": line1_debit,
+                "N": line1_credit,
+                "O": narrative
+            }
+            add_record(line1_record)
+            
+            dn_debit_sum = line1_debit
+            dn_credit_sum = 0.0
+            
+            line_num = 2
+            for itm in dn_rec['items']:
+                if itm['is_deduction']:
+                    dr_val = itm['amt']
+                    cr_val = None
+                    dn_debit_sum += dr_val
+                else:
+                    dr_val = None
+                    cr_val = itm['amt']
+                    dn_credit_sum += cr_val
+                    
+                line_record = {
+                    "type": "DETAIL",
+                    "D": None,
+                    "G": cfg["currency"],
+                    "H": line_num,
+                    "I": branch,
+                    "J": "0000",
+                    "K": int(itm['gl']),
+                    "L": stk_no if stk_no else None,
+                    "M": dr_val,
+                    "N": cr_val,
+                    "O": str(itm['desc'] or '')[:75],
+                    "Q": "O"
+                }
+                add_record(line_record)
+                line_num += 1
+                
+            add_record({"type": "BLANK"})
+            
+            total_debit_sum += dn_debit_sum
+            total_credit_sum += dn_credit_sum
+            
+            p_row = {
+                "Batch": b_batch_idx,
+                "Invoice": inv_no,
+                "Type": doc_code,
+                "Date": doc_date_str,
+                "Branch": branch,
+                "Category": "ใบตั้งหนี้ส่งมอบรถ (DN)",
+                "Customer": clean_cust or cust_name,
+                "Subaccount": subaccount,
+                "Net": abs_gross,
+                "VAT": 0.0,
+                "Gross": abs_gross,
+                "Stock No": stk_no or "",
+                "VIN": vin_no or "",
+                "Vehicle Cost": 0.0,
+                "Items": len(dn_rec['items']) + 1
+            }
+            preview_rows.append(p_row)
+            branch_previews[branch].append(p_row)
+            doc_type_previews[doc_group].append(p_row)
+            
+            b_st = branch_stats_data[branch]
+            b_st["total_invoices"] += 1
+            b_st["total_batches"] = b_batch_idx
+            b_st["total_tax"] += 0.0
+            b_st["total_debit"] += dn_debit_sum
+            b_st["total_credit"] += dn_credit_sum
+            
+            dt_st = doc_type_stats_data[doc_group]
+            dt_st["total_invoices"] += 1
+            dt_st["total_batches"] = dt_batch_idx
+            dt_st["total_tax"] += 0.0
+            dt_st["total_debit"] += dn_debit_sum
+            dt_st["total_credit"] += dn_credit_sum
+            
+            global_batch_idx += 1
         
     by_branch = {}
     for b in sorted(branch_batches.keys()):
@@ -2510,7 +2856,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         }
         
     by_doc_type = {}
-    for dt_key in ["0XD", "0XWG"]:
+    for dt_key in ["0XD", "0XWG", "0XDN"]:
         if dt_key in doc_type_batches:
             dt_st = doc_type_stats_data[dt_key]
             by_doc_type[dt_key] = {
@@ -2527,7 +2873,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             }
         
     summary_stats = {
-        "total_invoices": len(df_vat),
+        "total_invoices": len(preview_rows),
         "total_batches": global_batch_idx - 1,
         "total_debit": round(total_debit_sum, 2),
         "total_credit": round(total_credit_sum, 2),
@@ -3194,6 +3540,22 @@ with tab_sales:
                             
                 fin_data_sales = DEFAULT_FINANCE_DATA
                 
+                # 3. Load Active DN records from GL (excluding DNC cancellations)
+                dn_records_sales = None
+                try:
+                    if hasattr(gl_file, "seek"):
+                        gl_file.seek(0)
+                    dn_records_sales = load_dn_transactions_from_gl(
+                        gl_file,
+                        df_vat=df_vat_sales,
+                        stock_dict=stock_dict_sales,
+                        vin_dict=vin_dict_sales
+                    )
+                    if hasattr(gl_file, "seek"):
+                        gl_file.seek(0)
+                except Exception as e:
+                    pass
+                
                 rows_sales, stats_sales, preview_sales = transform_sales_to_autoline(
                     df_vat_sales,
                     gl_dict_sales,
@@ -3204,7 +3566,8 @@ with tab_sales:
                     vehicle_gl_dict=veh_gl_dict_sales,
                     vehicle_profit_dict=profit_dict_sales,
                     vin_dict=vin_dict_sales,
-                    user_config=sales_config_override
+                    user_config=sales_config_override,
+                    dn_records=dn_records_sales
                 )
                 
             st.success("✅ ประมวลผลข้อมูลฝ่ายขายสำเร็จเรียบร้อย!")
@@ -3323,7 +3686,8 @@ with tab_sales:
                 [
                     "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)",
                     "🏢 แยกตามสาขา Autoline (0001 / 0002)",
-                    "📑 แยกตามประเภทบิล (0XD / 0XWG)",
+                    "📑 แยกตามประเภทบิล (0XD / 0XWG / 0XDN)",
+                    "📑 ดาวน์โหลดเฉพาะ Invoice DN (Debit Note)",
                     "📦 รวมทั้งหมด (Combined All Invoices)"
                 ],
                 horizontal=True,
@@ -3378,14 +3742,15 @@ with tab_sales:
                             use_container_width=True
                         )
 
-            # OPTION 1: SEPARATED BY INVOICE TYPE (0XD / 0XWG)
-            elif dl_choice == "📑 แยกตามประเภทบิล (0XD / 0XWG)":
-                col_dt1, col_dt2 = st.columns(2)
+            # OPTION 1: SEPARATED BY INVOICE TYPE (0XD / 0XWG / 0XDN)
+            elif dl_choice == "📑 แยกตามประเภทบิล (0XD / 0XWG / 0XDN)":
+                col_dt1, col_dt2, col_dt3 = st.columns(3)
                 dt_0xd = by_dt.get("0XD")
                 dt_0xwg = by_dt.get("0XWG")
+                dt_0xdn = by_dt.get("0XDN")
                 
                 with col_dt1:
-                    st.markdown("#### 1. บิลกลุ่ม 0XD (เงินจอง / ป้ายแดง / ค่าจดทะเบียน / อุปกรณ์ / คอมไฟแนนซ์)")
+                    st.markdown("#### 1. บิลกลุ่ม 0XD (เงินจอง / มัดจำป้ายแดง / คอมไฟแนนซ์)")
                     if dt_0xd:
                         st.info(
                             f"- จำนวนบิล: **{dt_0xd['total_invoices']:,}** ฉบับ (Batch 1 - {dt_0xd['total_batches']:,})\n"
@@ -3395,7 +3760,7 @@ with tab_sales:
                         )
                         excel_0xd = generate_output_excel(template_path, dt_0xd["rows"])
                         st.download_button(
-                            label=f"⬇️ ดาวน์โหลดไฟล์กลุ่ม 0XD ({dt_0xd['total_invoices']:,} ฉบับ)",
+                            label=f"⬇️ ดาวน์โหลดไฟล์ 0XD ({dt_0xd['total_invoices']:,} ฉบับ)",
                             data=excel_0xd,
                             file_name=f"Autoline_Import_SALES_0XD_{now_str}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -3406,7 +3771,7 @@ with tab_sales:
                         st.warning("ไม่พบเอกสารกลุ่ม 0XD")
                         
                 with col_dt2:
-                    st.markdown("#### 2. บิลกลุ่ม 0XWG (ขายรถยนต์ / ใบลดหนี้ พร้อมบันทึกต้นทุน COGS)")
+                    st.markdown("#### 2. บิลกลุ่ม 0XWG (ขายรถยนต์ / ใบลดหนี้ พร้อมต้นทุน COGS)")
                     if dt_0xwg:
                         st.info(
                             f"- จำนวนบิล: **{dt_0xwg['total_invoices']:,}** ฉบับ (Batch 1 - {dt_0xwg['total_batches']:,})\n"
@@ -3416,7 +3781,7 @@ with tab_sales:
                         )
                         excel_0xwg = generate_output_excel(template_path, dt_0xwg["rows"])
                         st.download_button(
-                            label=f"⬇️ ดาวน์โหลดไฟล์กลุ่ม 0XWG ({dt_0xwg['total_invoices']:,} ฉบับ)",
+                            label=f"⬇️ ดาวน์โหลดไฟล์ 0XWG ({dt_0xwg['total_invoices']:,} ฉบับ)",
                             data=excel_0xwg,
                             file_name=f"Autoline_Import_SALES_0XWG_{now_str}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -3426,20 +3791,110 @@ with tab_sales:
                     else:
                         st.warning("ไม่พบเอกสารกลุ่ม 0XWG")
                         
-                if dt_0xd and dt_0xwg:
+                with col_dt3:
+                    st.markdown("#### 3. บิลกลุ่ม 0XDN (ใบตั้งหนี้ส่งมอบรถ / เงินดาวน์ / อุปกรณ์ / งวดแรก)")
+                    if dt_0xdn:
+                        st.info(
+                            f"- จำนวนบิล: **{dt_0xdn['total_invoices']:,}** ฉบับ (Batch 1 - {dt_0xdn['total_batches']:,})\n"
+                            f"- จำนวนแถว: **{len(dt_0xdn['rows']):,}** บรรทัด\n"
+                            f"- ยอดเดบิตรวม: **{dt_0xdn['total_debit']:,.2f}** ฿\n"
+                            f"- ยอดเครดิตรวม: **{dt_0xdn['total_credit']:,.2f}** ฿"
+                        )
+                        excel_0xdn = generate_output_excel(template_path, dt_0xdn["rows"])
+                        st.download_button(
+                            label=f"⬇️ ดาวน์โหลดไฟล์ 0XDN ({dt_0xdn['total_invoices']:,} ฉบับ)",
+                            data=excel_0xdn,
+                            file_name=f"Autoline_Import_SALES_0XDN_{now_str}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_sales_0xdn_btn",
+                            use_container_width=True
+                        )
+                    else:
+                        st.warning("ไม่พบเอกสารกลุ่ม 0XDN")
+                        
+                if any([dt_0xd, dt_0xwg, dt_0xdn]):
                     import zipfile
                     zip_dt_buffer = BytesIO()
                     with zipfile.ZipFile(zip_dt_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                        zf.writestr(f"Autoline_Import_SALES_0XD_{now_str}.xlsx", excel_0xd.getvalue())
-                        zf.writestr(f"Autoline_Import_SALES_0XWG_{now_str}.xlsx", excel_0xwg.getvalue())
+                        if dt_0xd:
+                            zf.writestr(f"Autoline_Import_SALES_0XD_{now_str}.xlsx", excel_0xd.getvalue())
+                        if dt_0xwg:
+                            zf.writestr(f"Autoline_Import_SALES_0XWG_{now_str}.xlsx", excel_0xwg.getvalue())
+                        if dt_0xdn:
+                            zf.writestr(f"Autoline_Import_SALES_0XDN_{now_str}.xlsx", excel_0xdn.getvalue())
                     zip_dt_buffer.seek(0)
                     st.download_button(
-                        label=f"📦 ดาวน์โหลดทั้ง 2 ไฟล์ (0XD + 0XWG ใน ZIP เดียว)",
+                        label=f"📦 ดาวน์โหลดรวมทุกประเภทบิล (0XD + 0XWG + 0XDN ใน ZIP เดียว)",
                         data=zip_dt_buffer,
                         file_name=f"Autoline_Import_SALES_BY_DOC_TYPE_{now_str}.zip",
                         mime="application/zip",
                         key="dl_sales_dt_zip_btn"
                     )
+
+            # OPTION: DEDICATED DN DOWNLOAD
+            elif dl_choice == "📑 ดาวน์โหลดเฉพาะ Invoice DN (Debit Note)":
+                dt_0xdn = by_dt.get("0XDN")
+                if dt_0xdn:
+                    st.markdown("#### 📑 ข้อมูลเอกสาร Invoice DN (Debit Note ที่ไม่ถูกยกเลิกด้วย DNC)")
+                    st.caption("แปลงข้อมูลจากบัญชีแยกประเภท (GL) เข้าสู่ 6 ผังบัญชี Autoline: 21931002 (เงินดาวน์), 21931101 (อุปกรณ์ตกแต่ง), 21931009 (ค่างวดแรก), 21931007 (ประกันสินเชื่อ), 21931006 (จดทะเบียน), 21931099 (อย่างอื่น)")
+                    
+                    st.info(
+                        f"📊 **สรุปข้อมูล DN**: จำนวน **{dt_0xdn['total_invoices']:,}** ฉบับ (Batch 1 - {dt_0xdn['total_batches']:,}) | "
+                        f"จำนวนแถว **{len(dt_0xdn['rows']):,}** บรรทัด | "
+                        f"ยอดเดบิต/เครดิตสมดุล **{dt_0xdn['total_debit']:,.2f}** บาท"
+                    )
+                    
+                    excel_0xdn = generate_output_excel(template_path, dt_0xdn["rows"])
+                    col_dn_main, col_dn_zip = st.columns(2)
+                    with col_dn_main:
+                        st.download_button(
+                            label=f"⬇️ ดาวน์โหลดไฟล์ DN รวมทุกสาขา ({dt_0xdn['total_invoices']:,} ฉบับ)",
+                            data=excel_0xdn,
+                            file_name=f"Autoline_Import_SALES_0XDN_ALL_{now_str}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_sales_0xdn_only_btn",
+                            use_container_width=True
+                        )
+                        
+                    st.markdown("##### หรือดาวน์โหลด DN แยกตามสาขา DealerPro ทั้ง 5:")
+                    dp_dn_branches = split_rows_by_dealerpro_branch(dt_0xdn["rows"])
+                    cols_dp_dn = st.columns(6)
+                    dn_branch_excels = {}
+                    for idx_b, b_code in enumerate(["01", "02", "03", "04", "05"]):
+                        b_info = dp_dn_branches.get(b_code, {"rows": [], "total_documents": 0})
+                        with cols_dp_dn[idx_b]:
+                            if b_info["total_documents"] > 0:
+                                b_excel = generate_output_excel(template_path, b_info["rows"])
+                                dn_branch_excels[b_code] = b_excel
+                                st.download_button(
+                                    label=f"🏬 DN สาขา {b_code}\n({b_info['total_documents']:,} ฉบับ)",
+                                    data=b_excel,
+                                    file_name=f"Autoline_Import_SALES_0XDN_BRANCH_{b_code}_{now_str}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key=f"dl_dn_b_{b_code}",
+                                    use_container_width=True
+                                )
+                            else:
+                                st.button(f"🏬 DN สาขา {b_code}\n(ไม่มีข้อมูล)", disabled=True, use_container_width=True, key=f"dis_dn_b_{b_code}")
+                                
+                    if dn_branch_excels:
+                        import zipfile
+                        dn_zip_buf = BytesIO()
+                        with zipfile.ZipFile(dn_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for b_c, b_ex in dn_branch_excels.items():
+                                zf.writestr(f"Autoline_Import_SALES_0XDN_BRANCH_{b_c}_{now_str}.xlsx", b_ex.getvalue())
+                        dn_zip_buf.seek(0)
+                        with cols_dp_dn[5]:
+                            st.download_button(
+                                label=f"🗂️ ดาวน์โหลด ZIP\n(DN 5 สาขา DealerPro)",
+                                data=dn_zip_buf,
+                                file_name=f"Autoline_Import_SALES_0XDN_5BRANCHES_{now_str}.zip",
+                                mime="application/zip",
+                                key="dl_dn_zip_btn",
+                                use_container_width=True
+                            )
+                else:
+                    st.warning("ไม่พบเอกสารประเภท DN ในไฟล์บัญชีแยกประเภท")
 
             # OPTION 2: COMBINED ALL INVOICES
             elif dl_choice == "📦 รวมทั้งหมด (Combined All Invoices)":
