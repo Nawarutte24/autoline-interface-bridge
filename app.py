@@ -6,6 +6,7 @@ import os
 import sys
 import datetime
 from io import BytesIO
+from collections import defaultdict
 
 # =============================================================================
 # 1. FIXED RULES & CONFIGURATION (DEALERPRO -> AUTOLINE)
@@ -946,6 +947,62 @@ def split_rows_by_branch(rows_to_write):
             "total_documents": b2_idx - 1
         }
     }
+
+def split_rows_by_dealerpro_branch(rows_to_write):
+    """
+    แยกรายการแถว Autoline ตามรหัสสาขา DealerPro ทั้ง 5 สาขา โดยอ้างอิงจาก 2 ตัวแรกของเลข Invoice:
+    - 01: สาขา 01 (เช่น 01SI..., 01WG..., 01D...)
+    - 02: สาขา 02 (เช่น 02SI..., 02WG..., 02D...)
+    - 03: สาขา 03 (เช่น 03SI..., 03WG..., 03D...)
+    - 04: สาขา 04 (เช่น 04SI..., 04WG..., 04D...)
+    - 05: สาขา 05 (เช่น 05SI..., 05WG..., 05D...)
+    พร้อมรันเลข Batch Number (Col D) ใหม่ตั้งแต่ 1..N สำหรับแต่ละไฟล์สาขา
+    """
+    doc_blocks = []
+    current_block = []
+    current_dp_branch = "01"
+    
+    for row in rows_to_write:
+        if row.get("type") == "HEADER":
+            if current_block:
+                doc_blocks.append((current_dp_branch, current_block))
+                current_block = []
+            inv_no = str(row.get("A") or row.get("B") or "").strip()
+            pfx = inv_no[:2]
+            current_dp_branch = pfx if pfx in ("01", "02", "03", "04", "05") else (pfx if pfx else "01")
+            current_block.append(row)
+        elif current_block:
+            current_block.append(row)
+            
+    if current_block:
+        doc_blocks.append((current_dp_branch, current_block))
+        
+    branch_rows = defaultdict(list)
+    branch_counters = defaultdict(int)
+    
+    for b_pfx, block in doc_blocks:
+        branch_counters[b_pfx] += 1
+        b_idx = branch_counters[b_pfx]
+        
+        for r in block:
+            r_copy = dict(r)
+            if r_copy.get("type") in ("HEADER", "ITEM", "DETAIL"):
+                r_copy["D"] = b_idx
+            branch_rows[b_pfx].append(r_copy)
+            
+    # Clean trailing BLANK
+    for b_pfx in branch_rows:
+        if branch_rows[b_pfx] and branch_rows[b_pfx][-1].get("type") == "BLANK":
+            branch_rows[b_pfx].pop()
+            
+    result = {}
+    for b_pfx in sorted(branch_rows.keys()):
+        result[b_pfx] = {
+            "branch": b_pfx,
+            "rows": branch_rows[b_pfx],
+            "total_documents": branch_counters[b_pfx]
+        }
+    return result
 
 def generate_output_excel(template_path, rows_to_write):
     wb = get_base_autoline_workbook(template_path)
@@ -2591,78 +2648,142 @@ with tab_aftersales:
                 else:
                     kpi6.metric("สถานะดุลบัญชี", "พบเอกสารไม่ดุล ⚠️", delta=f"{summary_stats['unbalanced_count']} ฉบับ")
 
-                # Download Section (รองรับดาวน์โหลดแยกตามสาขา Autoline: 0001 และ 0002)
+                # Download Section (รองรับดาวน์โหลดแยกตามสาขา DealerPro ทั้ง 5 หรือตามสาขา Autoline)
                 st.markdown("---")
-                st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (แยกตามสาขา)")
-                st.caption("โครงสร้าง Autoline AR/AP (ARI / ARC) แบ่งตามสาขาใน Autoline: สาขา 01, 03, 04, 05 เข้า **Branch 0001** และ สาขา 02 เข้า **Branch 0002**")
+                st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline")
+                
+                af_dl_choice = st.radio(
+                    "เลือกรูปแบบการดาวน์โหลดไฟล์ (Aftersales):",
+                    [
+                        "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)",
+                        "🏢 แยกตามสาขา Autoline (Branch 0001 & 0002)",
+                        "📦 รวมทุกสาขาในไฟล์เดียว (Combined All Invoices)"
+                    ],
+                    horizontal=True,
+                    key="af_dl_choice_radio"
+                )
 
-                by_branch = summary_stats.get("by_branch", {})
                 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-                b1_data = by_branch.get("0001", {"rows": [], "total_documents": 0})
-                b2_data = by_branch.get("0002", {"rows": [], "total_documents": 0})
-                b1_count = b1_data["total_documents"]
-                b2_count = b2_data["total_documents"]
+                if af_dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
+                    st.caption("แบ่งไฟล์ตามรหัสสาขา DealerPro ทั้ง 5 (อ้างอิงจากเลข Invoice 01..., 02..., 03..., 04..., 05...) พร้อมรันเลข Batch เริ่มจาก 1 ในแต่ละไฟล์")
+                    dp_af_branches = split_rows_by_dealerpro_branch(rows_to_write)
+                    target_pfxs = ["01", "02", "03", "04", "05"]
+                    all_pfxs = sorted(set(target_pfxs).union(set(dp_af_branches.keys())))
+                    
+                    cols_dp = st.columns(len(all_pfxs) + 1)
+                    dp_excels = {}
+                    
+                    for idx_p, pfx in enumerate(all_pfxs):
+                        p_data = dp_af_branches.get(pfx, {"rows": [], "total_documents": 0})
+                        p_count = p_data["total_documents"]
+                        with cols_dp[idx_p]:
+                            if p_count > 0:
+                                p_excel = generate_output_excel(template_path, p_data["rows"])
+                                dp_excels[pfx] = p_excel
+                                st.download_button(
+                                    label=f"🏬 สาขา {pfx}\n({p_count:,} ฉบับ)",
+                                    data=p_excel,
+                                    file_name=f"Autoline_Import_AFTERSALE_BRANCH_{pfx}_{now_str}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key=f"dl_af_dp_{pfx}",
+                                    use_container_width=True
+                                )
+                            else:
+                                st.button(f"🏬 สาขา {pfx}\n(ไม่มีข้อมูล)", disabled=True, use_container_width=True, key=f"dis_af_dp_{pfx}")
+                                
+                    if dp_excels:
+                        import zipfile
+                        dp_zip_buf = BytesIO()
+                        with zipfile.ZipFile(dp_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for pfx, p_excel in dp_excels.items():
+                                zf.writestr(f"Autoline_Import_AFTERSALE_BRANCH_{pfx}_{now_str}.xlsx", p_excel.getvalue())
+                        dp_zip_buf.seek(0)
+                        with cols_dp[-1]:
+                            st.download_button(
+                                label=f"🗂️ ดาวน์โหลด ZIP\n(รวม 5 สาขา DealerPro)",
+                                data=dp_zip_buf,
+                                file_name=f"Autoline_Import_AFTERSALE_DEALERPRO_5BRANCHES_{now_str}.zip",
+                                mime="application/zip",
+                                key="dl_af_dp_zip",
+                                use_container_width=True
+                            )
+                elif af_dl_choice == "🏢 แยกตามสาขา Autoline (Branch 0001 & 0002)":
+                    st.caption("โครงสร้าง Autoline AR/AP (ARI / ARC) แบ่งตามสาขาใน Autoline: สาขา 01, 03, 04, 05 เข้า **Branch 0001** และ สาขา 02 เข้า **Branch 0002**")
+                    by_branch = summary_stats.get("by_branch", {})
+                    b1_data = by_branch.get("0001", {"rows": [], "total_documents": 0})
+                    b2_data = by_branch.get("0002", {"rows": [], "total_documents": 0})
+                    b1_count = b1_data["total_documents"]
+                    b2_count = b2_data["total_documents"]
 
-                col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
-                
-                excel_b1 = None
-                excel_b2 = None
-                
-                with col_dl1:
-                    if b1_count > 0:
-                        excel_b1 = generate_output_excel(template_path, b1_data["rows"])
+                    col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
+                    excel_b1 = None
+                    excel_b2 = None
+
+                    with col_dl1:
+                        if b1_count > 0:
+                            excel_b1 = generate_output_excel(template_path, b1_data["rows"])
+                            st.download_button(
+                                label=f"🏢 Branch 0001 ({b1_count:,} ใบ)\n(สาขา 01, 03, 04, 05)",
+                                data=excel_b1,
+                                file_name=f"Autoline_Import_AFTERSALE_BRANCH0001_{now_str}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_af_b1",
+                                use_container_width=True
+                            )
+                        else:
+                            st.button("🏢 Branch 0001 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_af_b1")
+
+                    with col_dl2:
+                        if b2_count > 0:
+                            excel_b2 = generate_output_excel(template_path, b2_data["rows"])
+                            st.download_button(
+                                label=f"🏢 Branch 0002 ({b2_count:,} ใบ)\n(สาขา 02 - เกษตรนวมินทร์)",
+                                data=excel_b2,
+                                file_name=f"Autoline_Import_AFTERSALE_BRANCH0002_{now_str}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_af_b2",
+                                use_container_width=True
+                            )
+                        else:
+                            st.button("🏢 Branch 0002 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_af_b2")
+
+                    with col_dl3:
+                        excel_all = generate_output_excel(template_path, rows_to_write)
                         st.download_button(
-                            label=f"🏢 Branch 0001 ({b1_count:,} ใบ)\n(สาขา 01, 03, 04, 05)",
-                            data=excel_b1,
-                            file_name=f"Autoline_Import_AFTERSALE_BRANCH0001_{now_str}.xlsx",
+                            label=f"📦 โหลดรวมทุกสาขา ({b1_count + b2_count:,} ใบ)\n(All Combined)",
+                            data=excel_all,
+                            file_name=f"Autoline_Import_AFTERSALE_ALL_{now_str}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_af_b1",
+                            key="dl_af_all",
                             use_container_width=True
                         )
-                    else:
-                        st.button("🏢 Branch 0001 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_af_b1")
 
-                with col_dl2:
-                    if b2_count > 0:
-                        excel_b2 = generate_output_excel(template_path, b2_data["rows"])
+                    with col_dl4:
+                        import zipfile
+                        zip_buf = BytesIO()
+                        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                            if excel_b1 is not None:
+                                zf.writestr(f"Autoline_Import_AFTERSALE_BRANCH0001_{now_str}.xlsx", excel_b1.getvalue())
+                            if excel_b2 is not None:
+                                zf.writestr(f"Autoline_Import_AFTERSALE_BRANCH0002_{now_str}.xlsx", excel_b2.getvalue())
+                        zip_buf.seek(0)
                         st.download_button(
-                            label=f"🏢 Branch 0002 ({b2_count:,} ใบ)\n(สาขา 02 - เกษตรนวมินทร์)",
-                            data=excel_b2,
-                            file_name=f"Autoline_Import_AFTERSALE_BRANCH0002_{now_str}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_af_b2",
+                            label=f"🗂️ ดาวน์โหลด (ZIP)\n(รวมไฟล์แยก 0001 & 0002)",
+                            data=zip_buf,
+                            file_name=f"Autoline_Import_AFTERSALE_BRANCHES_{now_str}.zip",
+                            mime="application/zip",
+                            key="dl_af_zip",
                             use_container_width=True
                         )
-                    else:
-                        st.button("🏢 Branch 0002 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_af_b2")
-
-                with col_dl3:
+                else:
                     excel_all = generate_output_excel(template_path, rows_to_write)
                     st.download_button(
-                        label=f"📦 โหลดรวมทุกสาขา ({b1_count + b2_count:,} ใบ)\n(All Combined)",
+                        label=f"📦 ดาวน์โหลดรวมทุกสาขา ({summary_stats['total_documents']:,} ฉบับ)\n(Autoline_Import_AFTERSALE_ALL_{now_str}.xlsx)",
                         data=excel_all,
                         file_name=f"Autoline_Import_AFTERSALE_ALL_{now_str}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="dl_af_all",
-                        use_container_width=True
-                    )
-
-                with col_dl4:
-                    import zipfile
-                    zip_buf = BytesIO()
-                    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                        if excel_b1 is not None:
-                            zf.writestr(f"Autoline_Import_AFTERSALE_BRANCH0001_{now_str}.xlsx", excel_b1.getvalue())
-                        if excel_b2 is not None:
-                            zf.writestr(f"Autoline_Import_AFTERSALE_BRANCH0002_{now_str}.xlsx", excel_b2.getvalue())
-                    zip_buf.seek(0)
-                    st.download_button(
-                        label=f"🗂️ ดาวน์โหลด (ZIP)\n(รวมไฟล์แยก 0001 & 0002)",
-                        data=zip_buf,
-                        file_name=f"Autoline_Import_AFTERSALE_BRANCHES_{now_str}.zip",
-                        mime="application/zip",
-                        key="dl_af_zip",
+                        key="dl_af_all_single",
                         use_container_width=True
                     )
                     
@@ -2756,75 +2877,139 @@ with tab_aftersales:
                             
                         # Download Section (Parts Sales แยกตามสาขา Autoline: 0001 และ 0002)
                         st.markdown("---")
-                        st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (Parts Sales - แยกตามสาขา)")
-                        st.caption("โครงสร้าง Autoline AR Journal Import แบ่งตามสาขา: สาขา 01, 03, 04, 05 เข้า **Branch 0001** และ สาขา 02 เข้า **Branch 0002**")
+                        st.subheader("📥 ดาวน์โหลดไฟล์สำหรับ Autoline (Parts Sales)")
+                        parts_dl_choice = st.radio(
+                            "เลือกรูปแบบการดาวน์โหลดไฟล์ (Parts Sales):",
+                            [
+                                "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)",
+                                "🏢 แยกตามสาขา Autoline (Branch 0001 & 0002)",
+                                "📦 รวมทุกสาขาในไฟล์เดียว (Combined All Invoices)"
+                            ],
+                            horizontal=True,
+                            key="parts_dl_choice_radio"
+                        )
 
-                        by_branch_parts = stats_parts.get("by_branch", {})
                         now_p_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-                        pb1_data = by_branch_parts.get("0001", {"rows": [], "total_documents": 0})
-                        pb2_data = by_branch_parts.get("0002", {"rows": [], "total_documents": 0})
-                        pb1_count = pb1_data["total_documents"]
-                        pb2_count = pb2_data["total_documents"]
+                        if parts_dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
+                            st.caption("แบ่งไฟล์ตามรหัสสาขา DealerPro ทั้ง 5 (อ้างอิงจากเลข Invoice 01..., 02..., 03..., 04..., 05...) พร้อมรันเลข Batch เริ่มจาก 1 ในแต่ละไฟล์")
+                            dp_parts_branches = split_rows_by_dealerpro_branch(rows_parts)
+                            target_pfxs = ["01", "02", "03", "04", "05"]
+                            all_pfxs = sorted(set(target_pfxs).union(set(dp_parts_branches.keys())))
+                            
+                            cols_pdp = st.columns(len(all_pfxs) + 1)
+                            dp_parts_excels = {}
+                            
+                            for idx_p, pfx in enumerate(all_pfxs):
+                                p_data = dp_parts_branches.get(pfx, {"rows": [], "total_documents": 0})
+                                p_count = p_data["total_documents"]
+                                with cols_pdp[idx_p]:
+                                    if p_count > 0:
+                                        p_excel = generate_output_excel(template_path, p_data["rows"])
+                                        dp_parts_excels[pfx] = p_excel
+                                        st.download_button(
+                                            label=f"🏬 สาขา {pfx}\n({p_count:,} ฉบับ)",
+                                            data=p_excel,
+                                            file_name=f"Autoline_Import_PARTS_BRANCH_{pfx}_{now_p_str}.xlsx",
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            key=f"dl_parts_dp_{pfx}",
+                                            use_container_width=True
+                                        )
+                                    else:
+                                        st.button(f"🏬 สาขา {pfx}\n(ไม่มีข้อมูล)", disabled=True, use_container_width=True, key=f"dis_parts_dp_{pfx}")
+                                        
+                            if dp_parts_excels:
+                                import zipfile
+                                dp_parts_zip_buf = BytesIO()
+                                with zipfile.ZipFile(dp_parts_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                                    for pfx, p_excel in dp_parts_excels.items():
+                                        zf.writestr(f"Autoline_Import_PARTS_BRANCH_{pfx}_{now_p_str}.xlsx", p_excel.getvalue())
+                                dp_parts_zip_buf.seek(0)
+                                with cols_pdp[-1]:
+                                    st.download_button(
+                                        label=f"🗂️ ดาวน์โหลด ZIP\n(รวม 5 สาขา DealerPro)",
+                                        data=dp_parts_zip_buf,
+                                        file_name=f"Autoline_Import_PARTS_DEALERPRO_5BRANCHES_{now_p_str}.zip",
+                                        mime="application/zip",
+                                        key="dl_parts_dp_zip",
+                                        use_container_width=True
+                                    )
+                        elif parts_dl_choice == "🏢 แยกตามสาขา Autoline (Branch 0001 & 0002)":
+                            st.caption("โครงสร้าง Autoline AR Journal Import แบ่งตามสาขา: สาขา 01, 03, 04, 05 เข้า **Branch 0001** และ สาขา 02 เข้า **Branch 0002**")
+                            by_branch_parts = stats_parts.get("by_branch", {})
+                            pb1_data = by_branch_parts.get("0001", {"rows": [], "total_documents": 0})
+                            pb2_data = by_branch_parts.get("0002", {"rows": [], "total_documents": 0})
+                            pb1_count = pb1_data["total_documents"]
+                            pb2_count = pb2_data["total_documents"]
 
-                        col_pdl1, col_pdl2, col_pdl3, col_pdl4 = st.columns(4)
-                        excel_pb1 = None
-                        excel_pb2 = None
+                            col_pdl1, col_pdl2, col_pdl3, col_pdl4 = st.columns(4)
+                            excel_pb1 = None
+                            excel_pb2 = None
 
-                        with col_pdl1:
-                            if pb1_count > 0:
-                                excel_pb1 = generate_output_excel(template_path, pb1_data["rows"])
+                            with col_pdl1:
+                                if pb1_count > 0:
+                                    excel_pb1 = generate_output_excel(template_path, pb1_data["rows"])
+                                    st.download_button(
+                                        label=f"🏢 Branch 0001 ({pb1_count:,} ใบ)\n(สาขา 01, 03, 04, 05)",
+                                        data=excel_pb1,
+                                        file_name=f"Autoline_Import_PARTS_BRANCH0001_{now_p_str}.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        key="dl_parts_b1",
+                                        use_container_width=True
+                                    )
+                                else:
+                                    st.button("🏢 Branch 0001 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_parts_b1")
+
+                            with col_pdl2:
+                                if pb2_count > 0:
+                                    excel_pb2 = generate_output_excel(template_path, pb2_data["rows"])
+                                    st.download_button(
+                                        label=f"🏢 Branch 0002 ({pb2_count:,} ใบ)\n(สาขา 02 - เกษตรนวมินทร์)",
+                                        data=excel_pb2,
+                                        file_name=f"Autoline_Import_PARTS_BRANCH0002_{now_p_str}.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        key="dl_parts_b2",
+                                        use_container_width=True
+                                    )
+                                else:
+                                    st.button("🏢 Branch 0002 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_parts_b2")
+
+                            with col_pdl3:
+                                excel_parts_output = generate_output_excel(template_path, rows_parts)
                                 st.download_button(
-                                    label=f"🏢 Branch 0001 ({pb1_count:,} ใบ)\n(สาขา 01, 03, 04, 05)",
-                                    data=excel_pb1,
-                                    file_name=f"Autoline_Import_PARTS_BRANCH0001_{now_p_str}.xlsx",
+                                    label=f"📦 โหลดรวมทุกสาขา ({pb1_count + pb2_count:,} ใบ)\n(All Combined)",
+                                    data=excel_parts_output,
+                                    file_name=f"Autoline_Import_PARTS_ALL_{now_p_str}.xlsx",
                                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    key="dl_parts_b1",
+                                    key="dl_parts_all",
                                     use_container_width=True
                                 )
-                            else:
-                                st.button("🏢 Branch 0001 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_parts_b1")
 
-                        with col_pdl2:
-                            if pb2_count > 0:
-                                excel_pb2 = generate_output_excel(template_path, pb2_data["rows"])
+                            with col_pdl4:
+                                import zipfile
+                                pzip_buf = BytesIO()
+                                with zipfile.ZipFile(pzip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                                    if excel_pb1 is not None:
+                                        zf.writestr(f"Autoline_Import_PARTS_BRANCH0001_{now_p_str}.xlsx", excel_pb1.getvalue())
+                                    if excel_pb2 is not None:
+                                        zf.writestr(f"Autoline_Import_PARTS_BRANCH0002_{now_p_str}.xlsx", excel_pb2.getvalue())
+                                pzip_buf.seek(0)
                                 st.download_button(
-                                    label=f"🏢 Branch 0002 ({pb2_count:,} ใบ)\n(สาขา 02 - เกษตรนวมินทร์)",
-                                    data=excel_pb2,
-                                    file_name=f"Autoline_Import_PARTS_BRANCH0002_{now_p_str}.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    key="dl_parts_b2",
+                                    label=f"🗂️ ดาวน์โหลด (ZIP)\n(รวมไฟล์แยก 0001 & 0002)",
+                                    data=pzip_buf,
+                                    file_name=f"Autoline_Import_PARTS_BRANCHES_{now_p_str}.zip",
+                                    mime="application/zip",
+                                    key="dl_parts_zip",
                                     use_container_width=True
                                 )
-                            else:
-                                st.button("🏢 Branch 0002 (ไม่มีข้อมูล)", disabled=True, use_container_width=True, key="dis_parts_b2")
-
-                        with col_pdl3:
+                        else:
                             excel_parts_output = generate_output_excel(template_path, rows_parts)
                             st.download_button(
-                                label=f"📦 โหลดรวมทุกสาขา ({pb1_count + pb2_count:,} ใบ)\n(All Combined)",
+                                label=f"📦 ดาวน์โหลดรวมทุกสาขา ({stats_parts['total_documents']:,} ฉบับ)\n(Autoline_Import_PARTS_ALL_{now_p_str}.xlsx)",
                                 data=excel_parts_output,
                                 file_name=f"Autoline_Import_PARTS_ALL_{now_p_str}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                key="dl_parts_all",
-                                use_container_width=True
-                            )
-
-                        with col_pdl4:
-                            import zipfile
-                            pzip_buf = BytesIO()
-                            with zipfile.ZipFile(pzip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                                if excel_pb1 is not None:
-                                    zf.writestr(f"Autoline_Import_PARTS_BRANCH0001_{now_p_str}.xlsx", excel_pb1.getvalue())
-                                if excel_pb2 is not None:
-                                    zf.writestr(f"Autoline_Import_PARTS_BRANCH0002_{now_p_str}.xlsx", excel_pb2.getvalue())
-                            pzip_buf.seek(0)
-                            st.download_button(
-                                label=f"🗂️ ดาวน์โหลด (ZIP)\n(รวมไฟล์แยก 0001 & 0002)",
-                                data=pzip_buf,
-                                file_name=f"Autoline_Import_PARTS_BRANCHES_{now_p_str}.zip",
-                                mime="application/zip",
-                                key="dl_parts_zip",
+                                key="dl_parts_all_single",
                                 use_container_width=True
                             )
 
@@ -3133,9 +3318,10 @@ with tab_sales:
             dl_choice = st.radio(
                 "เลือกรูปแบบการดาวน์โหลด (Download Format):",
                 [
+                    "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)",
+                    "🏢 แยกตามสาขา Autoline (0001 / 0002)",
                     "📑 แยกตามประเภทบิล (0XD / 0XWG)",
-                    "📦 รวมทั้งหมด (Combined All Invoices)",
-                    "🏢 แยกตามสาขา (By Branch: 0001 / 0002)"
+                    "📦 รวมทั้งหมด (Combined All Invoices)"
                 ],
                 horizontal=True,
                 key="sales_dl_format_choice"
@@ -3143,8 +3329,54 @@ with tab_sales:
             
             by_dt = stats_sales.get("by_doc_type", {})
             
+            # OPTION: DEALERPRO 5 BRANCHES
+            if dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
+                st.markdown("#### แยกไฟล์ตามรหัสสาขา DealerPro ทั้ง 5 (อ้างอิงผ่านเลข Invoice 01, 02, 03, 04, 05)")
+                st.caption("แบ่งไฟล์ตามรหัสสาขา DealerPro ทั้ง 5 (01..., 02..., 03..., 04..., 05...) พร้อมรันเลข Batch เริ่มจาก 1 ในแต่ละไฟล์โดยอัตโนมัติ")
+                dp_sales_branches = split_rows_by_dealerpro_branch(rows_sales)
+                target_pfxs = ["01", "02", "03", "04", "05"]
+                all_pfxs = sorted(set(target_pfxs).union(set(dp_sales_branches.keys())))
+                
+                cols_dp = st.columns(len(all_pfxs) + 1)
+                dp_excels = {}
+                
+                for idx_p, pfx in enumerate(all_pfxs):
+                    p_data = dp_sales_branches.get(pfx, {"rows": [], "total_documents": 0})
+                    p_count = p_data["total_documents"]
+                    with cols_dp[idx_p]:
+                        if p_count > 0:
+                            p_excel = generate_output_excel(template_path, p_data["rows"])
+                            dp_excels[pfx] = p_excel
+                            st.download_button(
+                                label=f"🏬 สาขา {pfx}\n({p_count:,} ฉบับ)",
+                                data=p_excel,
+                                file_name=f"Autoline_Import_SALES_BRANCH_{pfx}_{now_str}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"dl_sales_dp_{pfx}",
+                                use_container_width=True
+                            )
+                        else:
+                            st.button(f"🏬 สาขา {pfx}\n(ไม่มีข้อมูล)", disabled=True, use_container_width=True, key=f"dis_sales_dp_{pfx}")
+                            
+                if dp_excels:
+                    import zipfile
+                    dp_zip_buf = BytesIO()
+                    with zipfile.ZipFile(dp_zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for pfx, p_excel in dp_excels.items():
+                            zf.writestr(f"Autoline_Import_SALES_BRANCH_{pfx}_{now_str}.xlsx", p_excel.getvalue())
+                    dp_zip_buf.seek(0)
+                    with cols_dp[-1]:
+                        st.download_button(
+                            label=f"🗂️ ดาวน์โหลด ZIP\n(รวม 5 สาขา DealerPro)",
+                            data=dp_zip_buf,
+                            file_name=f"Autoline_Import_SALES_DEALERPRO_5BRANCHES_{now_str}.zip",
+                            mime="application/zip",
+                            key="dl_sales_dp_zip",
+                            use_container_width=True
+                        )
+
             # OPTION 1: SEPARATED BY INVOICE TYPE (0XD / 0XWG)
-            if dl_choice == "📑 แยกตามประเภทบิล (0XD / 0XWG)":
+            elif dl_choice == "📑 แยกตามประเภทบิล (0XD / 0XWG)":
                 col_dt1, col_dt2 = st.columns(2)
                 dt_0xd = by_dt.get("0XD")
                 dt_0xwg = by_dt.get("0XWG")
