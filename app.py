@@ -2305,7 +2305,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             itm_credit = itm_net if not is_cn else None
             
             itm_gl_str = str(itm.get("gl", "")).strip()
-            is_veh_line = is_wg or itm_gl_str in ["41111003", "49121001"]
+            is_veh_line = is_wg or itm_gl_str in ["41111003", "49121001", "49121004"]
             
             line_record = {
                 "type": "DETAIL",
