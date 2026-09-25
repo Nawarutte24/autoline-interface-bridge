@@ -2046,9 +2046,11 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             if car_cost <= 0 and stk_no and cost_dict:
                 car_cost = cost_dict.get(stk_no, 0.0)
                 
-            # Da's Template: {inv_no}_{Customer_Name}_{VIN}
-            if vin_no:
-                narrative = f"{inv_no}_{clean_cust}_{vin_no}" if clean_cust else f"{inv_no}_{vin_no}"
+            # Da's Template: {inv_no}_{Customer_Name}_{VIN (last 8 chars)}
+            vin_str = str(vin_no or "").strip()
+            vin_short = vin_str[-8:] if len(vin_str) >= 8 else vin_str
+            if vin_short:
+                narrative = f"{inv_no}_{clean_cust}_{vin_short}" if clean_cust else f"{inv_no}_{vin_short}"
             else:
                 narrative = f"{inv_no}_{clean_cust}" if clean_cust else inv_no
         else:
