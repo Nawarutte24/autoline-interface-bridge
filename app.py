@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import datetime
+import re
 from io import BytesIO
 from collections import defaultdict
 
@@ -2192,6 +2193,16 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
     cat_values = {k: 0.0 for k in cfg["categories"].keys()}
     unmatched_gl_count = 0
     
+    def add_entry(rec, b, dg, g_idx, b_idx, dt_idx):
+        if rec.get("type") == "BLANK":
+            rows_to_write.append({"type": "BLANK"})
+            branch_rows[b].append({"type": "BLANK"})
+            doc_type_rows[dg].append({"type": "BLANK"})
+        else:
+            rows_to_write.append(dict(rec, D=g_idx))
+            branch_rows[b].append(dict(rec, D=b_idx))
+            doc_type_rows[dg].append(dict(rec, D=dt_idx))
+    
     for _, row in df_vat.iterrows():
         inv_no = row["invoice_number"]
         doc_date = row["doc_date"]
@@ -2218,15 +2229,7 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
         doc_type_batches[doc_group] += 1
         dt_batch_idx = doc_type_batches[doc_group]
         
-        def add_record(rec):
-            if rec.get("type") == "BLANK":
-                rows_to_write.append({"type": "BLANK"})
-                branch_rows[branch].append({"type": "BLANK"})
-                doc_type_rows[doc_group].append({"type": "BLANK"})
-            else:
-                rows_to_write.append(dict(rec, D=g_batch_idx))
-                branch_rows[branch].append(dict(rec, D=b_batch_idx))
-                doc_type_rows[doc_group].append(dict(rec, D=dt_batch_idx))
+        add_record = lambda rec, _b=branch, _dg=doc_group, _g=g_batch_idx, _bi=b_batch_idx, _dti=dt_batch_idx: add_entry(rec, _b, _dg, _g, _bi, _dti)
                 
         doc_code = "ARC" if is_cn else "ARI"
         doc_seq = "SCREDITV" if is_cn else "SINVOICV"
@@ -2693,6 +2696,8 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             doc_group = "0XDN"
             doc_type_batches[doc_group] += 1
             dt_batch_idx = doc_type_batches[doc_group]
+            
+            add_record = lambda rec, _b=branch, _dg=doc_group, _g=g_batch_idx, _bi=b_batch_idx, _dti=dt_batch_idx: add_entry(rec, _b, _dg, _g, _bi, _dti)
             
             doc_code = "ARI"
             doc_seq = "SINVOICV"
@@ -3554,7 +3559,10 @@ with tab_sales:
                     if hasattr(gl_file, "seek"):
                         gl_file.seek(0)
                 except Exception as e:
-                    pass
+                    print(f"Error loading DN transactions from GL: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    st.error(f"⚠️ เกิดข้อผิดพลาดในการโหลดข้อมูล DN จากไฟล์ GL: {e}")
                 
                 rows_sales, stats_sales, preview_sales = transform_sales_to_autoline(
                     df_vat_sales,
