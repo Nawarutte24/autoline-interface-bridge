@@ -1935,28 +1935,28 @@ def load_vehicle_profit(file_or_path):
 
 def classify_dn_line(acc, desc):
     d = str(desc or '').lower().strip()
-    # 1. หักค่าเทรดอิน (21700007)
+    # 1. ฟิล์ม / อุปกรณ์ตกแต่ง Accessory (21931101) - เฉพาะรายการฟิล์มและอุปกรณ์ตกแต่ง
+    if any(k in d for k in ['ฟิล์ม', 'film', 'เคลือบแก้ว', 'เคลือบเบาะ', 'อุปกรณ์ตกแต่ง', 'อุปกรณ์ตกเเต่ง', 'package', 'แพคเกจ', 'แพ็คเกจ', 'xenith', 'phantom', 'wall box', 'wall charge', 'เบาะ', 'wrap', 'warp car', 'warb car', 'ม่าน', 'ชุดแต่ง']):
+        return '21931101', 'อุปกรณ์ตกแต่ง Accessory'
+    # 2. หักค่าเทรดอิน (21700007)
     if any(k in d for k in ['เทรดอิน', 'trade in', 'trade-in', 'เทรด-อิน']) or acc == '611001':
         return '21700007', 'หักค่าเทรดอิน'
-    # 2. มัดจำป้ายแดง (21931003)
+    # 3. มัดจำป้ายแดง (21931003)
     if any(k in d for k in ['ป้ายแดง', 'มัดจำป้ายแดง', 'ค่าป้ายแดง', 'ป้ายเเดง']) or acc == '216005':
         return '21931003', 'มัดจำป้ายแดง'
-    # 3. เงินดาวน์ / หัก เงินจองรถยนต์ / ลดหนี้เงินจองรถยนต์ (21931002)
+    # 4. เงินดาวน์ / หัก เงินจองรถยนต์ / ลดหนี้เงินจองรถยนต์ (21931002)
     if any(k in d for k in ['เงินดาวน์', 'ค่าเงินดาวน์', 'ค่ารถยนต์', 'เงินจอง', 'หักเงินจอง', 'หัก เงินจอง', 'ลดหนี้เงินจอง', 'ลดหนี้ เงินจอง']) or acc in ('216004', '216003'):
         return '21931002', 'เงินดาวน์ / หักเงินจองรถยนต์'
-    # 4. ค่างวดแรก (21931009)
+    # 5. ค่างวดแรก (21931009)
     if 'ค่างวดแรก' in d or acc == '216006':
         return '21931009', 'ค่างวดแรก'
-    # 5. ประกันสินเชื่อ (21931007)
+    # 6. ประกันสินเชื่อ (21931007)
     if any(k in d for k in ['ประกัน', 'คุ้มครองสินเชื่อ', 'ล็อคมูลค่ารถ']) or acc == '216007':
         return '21931007', 'ประกันสินเชื่อ'
-    # 6. จดทะเบียน (21931006)
+    # 7. จดทะเบียน (21931006)
     if any(k in d for k in ['จดทะเบียน', 'สลับป้าย', 'คัดป้าย', 'บริการจดทะเบียน']):
         return '21931006', 'จดทะเบียน'
-    # 7. อุปกรณ์ตกแต่ง Accessory (21931101)
-    if any(k in d for k in ['ฟิล์ม', 'film', 'เคลือบแก้ว', 'เคลือบเบาะ', 'อุปกรณ์ตกแต่ง', 'อุปกรณ์ตกเเต่ง', 'package', 'xenith', 'phantom', 'wall box', 'wall charge']) or acc == '413002':
-        return '21931101', 'อุปกรณ์ตกแต่ง Accessory'
-    # 8. อย่างอื่นนอกเหนือจากในนี้ (21931099)
+    # 8. อย่างอื่นนอกเหนือจากในนี้ (21931099) - รายการอื่นๆ ที่ไม่มีหมวดหมู่ (เช่น ค่าขอใช้เลข, ค่าตรวจนอก, ค่ารถสไลด์, ค่าทำเรื่องเปลี่ยนสี ฯลฯ)
     return '21931099', 'อย่างอื่นนอกเหนือจากในนี้'
 
 def load_dn_transactions_from_gl(gl_file_or_path, df_vat=None, stock_dict=None, vin_dict=None):
@@ -2718,6 +2718,24 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             clean_cust = clean_customer_name(cust_name)
             subaccount = dn_rec['subaccount']
             doc_date_str = dn_rec['date']
+            dn_date_obj = None
+            if doc_date_str:
+                parts = str(doc_date_str).strip().split('/')
+                if len(parts) == 3:
+                    try:
+                        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                        year = 2000 + y if y < 100 else y
+                        dn_date_obj = datetime.datetime(year, m, d)
+                    except:
+                        pass
+                elif '-' in str(doc_date_str):
+                    parts = str(doc_date_str).strip().split('-')
+                    if len(parts) == 3:
+                        try:
+                            dn_date_obj = datetime.datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+                        except:
+                            pass
+            dn_date_val = dn_date_obj if dn_date_obj else doc_date_str
             
             vin_str = str(vin_no or "").strip()
             vin_short = vin_str[-8:] if len(vin_str) >= 8 else vin_str
@@ -2740,11 +2758,11 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
                 "H": doc_seq,
                 "I": abs_tax,
                 "J": abs_gross,
-                "K": doc_date_str,
+                "K": dn_date_val,
                 "L": None,
                 "M": inv_no,
                 "N": narrative,
-                "O": doc_date_str,
+                "O": dn_date_val,
                 "P": subaccount,
                 "Q": None,
                 "R": None,
