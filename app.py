@@ -1754,12 +1754,14 @@ def clean_customer_name(name):
     s = re.sub(r'\s+(สำนักงานใหญ่|สนญ\.|สาขาที่\s*\d+)$', '', s, flags=re.IGNORECASE)
     return s.strip()
 
-def load_stock_numbers(file_or_path):
+def load_stock_numbers(file_or_path, return_maps=False):
     wb = openpyxl.load_workbook(file_or_path, data_only=True)
     ws = wb.active
     stock_by_inv = {}
     fin_coy_by_inv = {}
     vin_by_inv = {}
+    vin_to_stk = {}
+    stk_to_vin = {}
     
     # Auto-detect column layout:
     # Layout A (StockNumber2026): Col 1 = Stock (N0...), Col 2 = VIN, Col 3 = FinCode, Col 5 = Invoice
@@ -1791,6 +1793,10 @@ def load_stock_numbers(file_or_path):
                     stock_by_inv[inv_no] = stk_no
                 if vin_no and len(vin_no) >= 8:
                     vin_by_inv[inv_no] = vin_no
+            if stk_no and stk_no.startswith('N') and vin_no and len(vin_no) >= 8:
+                vin_to_stk[vin_no] = stk_no
+                vin_to_stk[vin_no[-8:]] = stk_no
+                stk_to_vin[stk_no] = vin_no
         elif detected_layout == 'C':
             stk_val = ws.cell(row=r, column=1).value
             vin_val = ws.cell(row=r, column=2).value
@@ -1803,22 +1809,32 @@ def load_stock_numbers(file_or_path):
                     stock_by_inv[inv_no] = stk_no
                 if vin_no and len(vin_no) >= 8:
                     vin_by_inv[inv_no] = vin_no
+            if stk_no and stk_no.startswith('N') and vin_no and len(vin_no) >= 8:
+                vin_to_stk[vin_no] = stk_no
+                vin_to_stk[vin_no[-8:]] = stk_no
+                stk_to_vin[stk_no] = vin_no
         else:
             c1 = ws.cell(row=r, column=1).value
             c2 = ws.cell(row=r, column=2).value
             c3 = ws.cell(row=r, column=3).value
             c5 = ws.cell(row=r, column=5).value
+            stk_no = str(c1).strip() if c1 is not None else ""
+            vin_no = str(c2).strip() if c2 is not None else ""
+            c3_str = str(c3).strip() if c3 is not None else ""
+            inv_no = str(c5).strip() if c5 is not None else ""
             if c1 and str(c1).strip().startswith('N0') and c5:
-                stk_no = str(c1).strip()
-                inv_no = str(c5).strip()
-                c3_str = str(c3).strip() if c3 is not None else ""
-                c2_str = str(c2).strip() if c2 is not None else ""
                 if inv_no:
                     stock_by_inv[inv_no] = stk_no
                     if c3_str:
                         fin_coy_by_inv[inv_no] = c3_str
                     if c2_str:
                         vin_by_inv[inv_no] = c2_str
+            if stk_no and stk_no.startswith('N') and vin_no and len(vin_no) >= 8:
+                vin_to_stk[vin_no] = stk_no
+                vin_to_stk[vin_no[-8:]] = stk_no
+                stk_to_vin[stk_no] = vin_no
+    if return_maps:
+        return stock_by_inv, fin_coy_by_inv, vin_by_inv, vin_to_stk, stk_to_vin
     return stock_by_inv, fin_coy_by_inv, vin_by_inv
 
 def load_vehicle_costs(file_or_path):
@@ -2045,7 +2061,7 @@ def classify_dn_line(acc, desc):
     # 8. อย่างอื่นนอกเหนือจากในนี้ (21931099) - รายการอื่นๆ ที่ไม่มีหมวดหมู่ (เช่น ค่าขอใช้เลข, ค่าตรวจนอก, ค่ารถสไลด์, ค่าทำเรื่องเปลี่ยนสี ฯลฯ)
     return '21931099', 'อย่างอื่นนอกเหนือจากในนี้'
 
-def load_dn_transactions_from_gl(gl_file_or_path, df_vat=None, stock_dict=None, vin_dict=None):
+def load_dn_transactions_from_gl(gl_file_or_path, df_vat=None, stock_dict=None, vin_dict=None, vin_to_stk=None):
     if hasattr(gl_file_or_path, "seek"):
         gl_file_or_path.seek(0)
     wb = openpyxl.load_workbook(gl_file_or_path, data_only=True)
@@ -2179,6 +2195,9 @@ def load_dn_transactions_from_gl(gl_file_or_path, df_vat=None, stock_dict=None, 
                         vin_no = vin_dict[wg_doc]
                     break
 
+        if not stk_no and vin_no and vin_to_stk:
+            stk_no = vin_to_stk.get(vin_no, vin_to_stk.get(vin_no[-8:] if len(vin_no) >= 8 else "")) or ""
+
         net_ar = sum(r['dr'] + r['cr'] for r in d['ar_lines'])
         abs_gross = round(net_ar, 2)
         
@@ -2217,7 +2236,7 @@ def load_dn_transactions_from_gl(gl_file_or_path, df_vat=None, stock_dict=None, 
 # =============================================================================
 # TRANSFORMATION ENGINE
 # =============================================================================
-def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None, fin_coy_dict=None, fin_data=None, vehicle_gl_dict=None, vin_dict=None, vehicle_profit_dict=None, user_config=None, dn_records=None):
+def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None, fin_coy_dict=None, fin_data=None, vehicle_gl_dict=None, vin_dict=None, vehicle_profit_dict=None, user_config=None, dn_records=None, vin_to_stk_map=None, stk_to_vin_map=None):
     import copy
     cfg = copy.deepcopy(DEFAULT_SALES_CONFIG)
     if user_config:
@@ -2359,12 +2378,20 @@ def transform_sales_to_autoline(df_vat, gl_dict, stock_dict=None, cost_dict=None
             if not vin_no and vin_dict:
                 vin_no = vin_dict.get(inv_no, "")
                 
-            # 3. Supplementary from Vehicle Profit (via VIN or Stock No cross-referencing)
+            # 3. Supplementary from Vehicle Profit or Stock cross-referencing (via VIN or Stock No cross-referencing)
+            v_stk_map = {}
+            s_vin_map = {}
+            v_cost_map = {}
+            s_cost_map = {}
             if vehicle_profit_dict:
-                v_stk_map = vehicle_profit_dict.get("vin_to_stk", {})
-                s_vin_map = vehicle_profit_dict.get("stk_to_vin", {})
-                v_cost_map = vehicle_profit_dict.get("vin_to_cost", {})
-                s_cost_map = vehicle_profit_dict.get("stk_to_cost", {})
+                v_stk_map.update(vehicle_profit_dict.get("vin_to_stk", {}))
+                s_vin_map.update(vehicle_profit_dict.get("stk_to_vin", {}))
+                v_cost_map.update(vehicle_profit_dict.get("vin_to_cost", {}))
+                s_cost_map.update(vehicle_profit_dict.get("stk_to_cost", {}))
+            if vin_to_stk_map:
+                v_stk_map.update(vin_to_stk_map)
+            if stk_to_vin_map:
+                s_vin_map.update(stk_to_vin_map)
                 
                 # Map VIN -> Stock No
                 if not stk_no and vin_no:
@@ -3676,8 +3703,9 @@ with tab_sales:
                 
                 # Optional Stock file (User upload or local workspace fallback)
                 stock_dict_sales, fin_coy_sales, vin_dict_sales = ({}, {}, {})
+                vin_to_stk_sales, stk_to_vin_sales = ({}, {})
                 if stock_file:
-                    stock_dict_sales, fin_coy_sales, vin_dict_sales = load_stock_numbers(stock_file)
+                    stock_dict_sales, fin_coy_sales, vin_dict_sales, vin_to_stk_sales, stk_to_vin_sales = load_stock_numbers(stock_file, return_maps=True)
                 else:
                     curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
                     cand_stocks = []
@@ -3688,7 +3716,7 @@ with tab_sales:
                             break
                     if cand_stocks:
                         try:
-                            stock_dict_sales, fin_coy_sales, vin_dict_sales = load_stock_numbers(os.path.join(curr_dir, cand_stocks[0]))
+                            stock_dict_sales, fin_coy_sales, vin_dict_sales, vin_to_stk_sales, stk_to_vin_sales = load_stock_numbers(os.path.join(curr_dir, cand_stocks[0]), return_maps=True)
                         except Exception:
                             pass
 
@@ -3724,7 +3752,8 @@ with tab_sales:
                         gl_file,
                         df_vat=df_vat_sales,
                         stock_dict=stock_dict_sales,
-                        vin_dict=vin_dict_sales
+                        vin_dict=vin_dict_sales,
+                        vin_to_stk=vin_to_stk_sales
                     )
                     if hasattr(gl_file, "seek"):
                         gl_file.seek(0)
@@ -3745,7 +3774,9 @@ with tab_sales:
                     vehicle_profit_dict=profit_dict_sales,
                     vin_dict=vin_dict_sales,
                     user_config=sales_config_override,
-                    dn_records=dn_records_sales
+                    dn_records=dn_records_sales,
+                    vin_to_stk_map=vin_to_stk_sales,
+                    stk_to_vin_map=stk_to_vin_sales
                 )
                 
             st.success("✅ ประมวลผลข้อมูลฝ่ายขายสำเร็จเรียบร้อย!")
