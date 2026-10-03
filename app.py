@@ -1717,22 +1717,65 @@ def load_stock_numbers(file_or_path):
     stock_by_inv = {}
     fin_coy_by_inv = {}
     vin_by_inv = {}
+    
+    # Auto-detect column layout:
+    # Layout A (StockNumber2026): Col 1 = Stock (N0...), Col 2 = VIN, Col 3 = FinCode, Col 5 = Invoice
+    # Layout B (TestData): Col 1 = VIN (L1...), Col 2 = Invoice (01WG...), Col 5 = Stock (N0...)
+    # Layout C (CarDetail): Col 1 = Stock (N0...), Col 2 = VIN (L1...), Col 3 = Invoice (01WG...)
+    detected_layout = 'A'
+    for r in range(1, min(15, ws.max_row + 1)):
+        c1_val = str(ws.cell(row=r, column=1).value or '').strip()
+        c2_val = str(ws.cell(row=r, column=2).value or '').strip()
+        c3_val = str(ws.cell(row=r, column=3).value or '').strip()
+        c5_val = str(ws.cell(row=r, column=5).value or '').strip()
+        if 'WG' in c2_val and c5_val.startswith('N'):
+            detected_layout = 'B'
+            break
+        elif c1_val.startswith('N0') and 'WG' in c3_val:
+            detected_layout = 'C'
+            break
+            
     for r in range(1, ws.max_row + 1):
-        c1 = ws.cell(row=r, column=1).value
-        c2 = ws.cell(row=r, column=2).value
-        c3 = ws.cell(row=r, column=3).value
-        c5 = ws.cell(row=r, column=5).value
-        if c1 and str(c1).strip().startswith('N0') and c5:
-            stk_no = str(c1).strip()
-            inv_no = str(c5).strip()
-            c3_str = str(c3).strip() if c3 is not None else ""
-            c2_str = str(c2).strip() if c2 is not None else ""
-            if inv_no:
-                stock_by_inv[inv_no] = stk_no
-                if c3_str:
-                    fin_coy_by_inv[inv_no] = c3_str
-                if c2_str:
-                    vin_by_inv[inv_no] = c2_str
+        if detected_layout == 'B':
+            vin_val = ws.cell(row=r, column=1).value
+            inv_val = ws.cell(row=r, column=2).value
+            stk_val = ws.cell(row=r, column=5).value
+            stk_no = str(stk_val).strip() if stk_val else ""
+            inv_no = str(inv_val).strip() if inv_val else ""
+            vin_no = str(vin_val).strip() if vin_val else ""
+            if inv_no and 'WG' in inv_no:
+                if stk_no and stk_no.startswith('N'):
+                    stock_by_inv[inv_no] = stk_no
+                if vin_no and len(vin_no) >= 8:
+                    vin_by_inv[inv_no] = vin_no
+        elif detected_layout == 'C':
+            stk_val = ws.cell(row=r, column=1).value
+            vin_val = ws.cell(row=r, column=2).value
+            inv_val = ws.cell(row=r, column=3).value
+            stk_no = str(stk_val).strip() if stk_val else ""
+            vin_no = str(vin_val).strip() if vin_val else ""
+            inv_no = str(inv_val).strip() if inv_val else ""
+            if inv_no and 'WG' in inv_no:
+                if stk_no and stk_no.startswith('N'):
+                    stock_by_inv[inv_no] = stk_no
+                if vin_no and len(vin_no) >= 8:
+                    vin_by_inv[inv_no] = vin_no
+        else:
+            c1 = ws.cell(row=r, column=1).value
+            c2 = ws.cell(row=r, column=2).value
+            c3 = ws.cell(row=r, column=3).value
+            c5 = ws.cell(row=r, column=5).value
+            if c1 and str(c1).strip().startswith('N0') and c5:
+                stk_no = str(c1).strip()
+                inv_no = str(c5).strip()
+                c3_str = str(c3).strip() if c3 is not None else ""
+                c2_str = str(c2).strip() if c2 is not None else ""
+                if inv_no:
+                    stock_by_inv[inv_no] = stk_no
+                    if c3_str:
+                        fin_coy_by_inv[inv_no] = c3_str
+                    if c2_str:
+                        vin_by_inv[inv_no] = c2_str
     return stock_by_inv, fin_coy_by_inv, vin_by_inv
 
 def load_vehicle_costs(file_or_path):
@@ -3560,12 +3603,32 @@ with tab_sales:
                     stock_dict_sales, fin_coy_sales, vin_dict_sales = load_stock_numbers(stock_file)
                 else:
                     curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
-                    cand_stocks = [f for f in os.listdir(curr_dir) if "StockNumber" in f and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
+                    cand_stocks = []
+                    for kw in ["TestData", "CarDetail", "รายงานยอดการขาย", "StockNumber"]:
+                        found = [f for f in os.listdir(curr_dir) if kw.lower() in f.lower() and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
+                        if found:
+                            cand_stocks.extend(found)
+                            break
                     if cand_stocks:
                         try:
                             stock_dict_sales, fin_coy_sales, vin_dict_sales = load_stock_numbers(os.path.join(curr_dir, cand_stocks[0]))
                         except Exception:
                             pass
+
+                # Master Cost fallback (User upload or local workspace fallback)
+                cost_dict_sales = {}
+                curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
+                cand_costs = []
+                for kw in ["รายละเอียดต้นทุน", "VehicleCost"]:
+                    found = [f for f in os.listdir(curr_dir) if kw.lower() in f.lower() and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
+                    if found:
+                        cand_costs.extend(found)
+                        break
+                if cand_costs:
+                    try:
+                        cost_dict_sales = load_vehicle_costs(os.path.join(curr_dir, cand_costs[0]))
+                    except Exception:
+                        pass
                             
                 fin_data_sales = DEFAULT_FINANCE_DATA
                 
@@ -3592,7 +3655,7 @@ with tab_sales:
                     df_vat_sales,
                     gl_dict_sales,
                     stock_dict=stock_dict_sales,
-                    cost_dict={},
+                    cost_dict=cost_dict_sales,
                     fin_coy_dict=fin_coy_sales,
                     fin_data=fin_data_sales,
                     vehicle_gl_dict=veh_gl_dict_sales,
