@@ -3507,23 +3507,31 @@ with tab_sales:
     # -------------------------------------------------------------------------
     st.markdown("### 🟡 ไฟล์เสริม (Optional Inputs)")
     st.caption("เสริมข้อมูลเพื่อดึงเลขสต๊อก (Stock No), เลขตัวถัง (VIN) และต้นทุนรถยนต์เพิ่มเติม (หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)")
-    with st.expander("📁 อัปโหลดไฟล์เสริม (VehicleProfit / StockNumber)", expanded=False):
-        col_o1, col_o2 = st.columns(2)
+    with st.expander("📁 อัปโหลดไฟล์เสริม (Optional - หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)", expanded=False):
+        col_o1, col_o2, col_o3 = st.columns(3)
         with col_o1:
-            st.markdown("**3. รายงานกำไรการขายรถ (Vehicle Profit Report)**")
-            st.caption("เช่น `VehicleProfit2026(AllBranch).xlsx` (ช่วยกู้คืนต้นทุนรถ, เลขสต๊อก, และ VIN)")
+            st.markdown("**3. ไฟล์แมปเลขสต๊อก / ตัวถัง (Stock & VIN)**")
+            st.caption("เช่น `TestData.xlsx`, `รายงานยอดการขาย(CarDetail).xlsx`, หรือ `StockNumber2026.xlsx`")
+            stock_file = st.file_uploader(
+                "เลือกไฟล์สต๊อก/ตัวถัง (.xlsx / .xls)", 
+                type=["xlsx", "xls"], 
+                key="sales_stock_upload"
+            )
+        with col_o2:
+            st.markdown("**4. ฐานข้อมูลต้นทุนรถยนต์ (Master Cost)**")
+            st.caption("เช่น `รายละเอียดต้นทุน.xlsx` หรือ `VehicleCost2026.xlsx`")
+            cost_file = st.file_uploader(
+                "เลือกไฟล์ต้นทุนรถยนต์ (.xlsx / .xls)", 
+                type=["xlsx", "xls"], 
+                key="sales_cost_upload"
+            )
+        with col_o3:
+            st.markdown("**5. รายงานกำไรการขายรถ (Vehicle Profit)**")
+            st.caption("เช่น `VehicleProfit2026(AllBranch).xlsx` (ช่วยกู้คืนข้อมูลสำรอง)")
             profit_file = st.file_uploader(
                 "เลือกไฟล์รายงานกำไรการขายรถ (.xlsx / .xls)", 
                 type=["xlsx", "xls"], 
                 key="sales_profit_upload"
-            )
-        with col_o2:
-            st.markdown("**4. รายงานเลขสต๊อกรถยนต์ (Stock Number Report)**")
-            st.caption("เช่น `StockNumber2026.xlsx` (ช่วยแมปเลขสต๊อกและ VIN เพิ่มเติม)")
-            stock_file = st.file_uploader(
-                "เลือกไฟล์เลขสต๊อกรถยนต์ (.xlsx / .xls)", 
-                type=["xlsx", "xls"], 
-                key="sales_stock_upload"
             )
         
     # -------------------------------------------------------------------------
@@ -3617,18 +3625,24 @@ with tab_sales:
 
                 # Master Cost fallback (User upload or local workspace fallback)
                 cost_dict_sales = {}
-                curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
-                cand_costs = []
-                for kw in ["รายละเอียดต้นทุน", "VehicleCost"]:
-                    found = [f for f in os.listdir(curr_dir) if kw.lower() in f.lower() and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
-                    if found:
-                        cand_costs.extend(found)
-                        break
-                if cand_costs:
+                if cost_file:
                     try:
-                        cost_dict_sales = load_vehicle_costs(os.path.join(curr_dir, cand_costs[0]))
-                    except Exception:
-                        pass
+                        cost_dict_sales = load_vehicle_costs(cost_file)
+                    except Exception as e:
+                        print(f"Error loading uploaded cost file: {e}")
+                else:
+                    curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
+                    cand_costs = []
+                    for kw in ["รายละเอียดต้นทุน", "VehicleCost"]:
+                        found = [f for f in os.listdir(curr_dir) if kw.lower() in f.lower() and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
+                        if found:
+                            cand_costs.extend(found)
+                            break
+                    if cand_costs:
+                        try:
+                            cost_dict_sales = load_vehicle_costs(os.path.join(curr_dir, cand_costs[0]))
+                        except Exception:
+                            pass
                             
                 fin_data_sales = DEFAULT_FINANCE_DATA
                 
