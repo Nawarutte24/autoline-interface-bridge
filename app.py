@@ -3510,18 +3510,16 @@ with tab_sales:
     with st.expander("📁 อัปโหลดไฟล์เสริม (Optional - หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)", expanded=True):
         col_o1, col_o2 = st.columns(2)
         with col_o1:
-            st.markdown("**3. ไฟล์แมปเลขสต๊อก / ตัวถัง (Stock & VIN)**")
-            st.caption("เช่น `TestData.xlsx`, `รายงานยอดการขาย(CarDetail).xlsx`, หรือ `StockNumber2026.xlsx`")
+            st.markdown("**3. ไฟล์รายงานยอดการขาย(CarDetail)**")
             stock_file = st.file_uploader(
-                "เลือกไฟล์สต๊อก/ตัวถัง (.xlsx / .xls)", 
+                "เลือกไฟล์รายงานยอดการขาย(CarDetail) (.xlsx / .xls)", 
                 type=["xlsx", "xls"], 
                 key="sales_stock_upload"
             )
         with col_o2:
-            st.markdown("**4. ฐานข้อมูลต้นทุนรถยนต์ (Master Cost)**")
-            st.caption("เช่น `รายละเอียดต้นทุน.xlsx` หรือ `VehicleCost2026.xlsx`")
+            st.markdown("**4. รายละเอียดต้นทุน(TOTAL COSTS - NEW)**")
             cost_file = st.file_uploader(
-                "เลือกไฟล์ต้นทุนรถยนต์ (.xlsx / .xls)", 
+                "เลือกไฟล์รายละเอียดต้นทุน (.xlsx / .xls)", 
                 type=["xlsx", "xls"], 
                 key="sales_cost_upload"
             )
