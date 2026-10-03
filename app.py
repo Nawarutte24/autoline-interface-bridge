@@ -3508,7 +3508,7 @@ with tab_sales:
     st.markdown("### 🟡 ไฟล์เสริม (Optional Inputs)")
     st.caption("เสริมข้อมูลเพื่อดึงเลขสต๊อก (Stock No), เลขตัวถัง (VIN) และต้นทุนรถยนต์เพิ่มเติม (หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)")
     with st.expander("📁 อัปโหลดไฟล์เสริม (Optional - หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)", expanded=False):
-        col_o1, col_o2, col_o3 = st.columns(3)
+        col_o1, col_o2 = st.columns(2)
         with col_o1:
             st.markdown("**3. ไฟล์แมปเลขสต๊อก / ตัวถัง (Stock & VIN)**")
             st.caption("เช่น `TestData.xlsx`, `รายงานยอดการขาย(CarDetail).xlsx`, หรือ `StockNumber2026.xlsx`")
@@ -3524,14 +3524,6 @@ with tab_sales:
                 "เลือกไฟล์ต้นทุนรถยนต์ (.xlsx / .xls)", 
                 type=["xlsx", "xls"], 
                 key="sales_cost_upload"
-            )
-        with col_o3:
-            st.markdown("**5. รายงานกำไรการขายรถ (Vehicle Profit)**")
-            st.caption("เช่น `VehicleProfit2026(AllBranch).xlsx` (ช่วยกู้คืนข้อมูลสำรอง)")
-            profit_file = st.file_uploader(
-                "เลือกไฟล์รายงานกำไรการขายรถ (.xlsx / .xls)", 
-                type=["xlsx", "xls"], 
-                key="sales_profit_upload"
             )
         
     # -------------------------------------------------------------------------
@@ -3592,18 +3584,8 @@ with tab_sales:
                     gl_file.seek(0)
                 veh_gl_dict_sales = load_vehicle_gl_cogs(gl_file)
                 
-                # Optional Profit file (User upload or local workspace fallback)
+                # Vehicle Profit (No longer needed with TestData + รายละเอียดต้นทุน)
                 profit_dict_sales = None
-                if profit_file:
-                    profit_dict_sales = load_vehicle_profit(profit_file)
-                else:
-                    curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
-                    cand_profits = [f for f in os.listdir(curr_dir) if "VehicleProfit" in f and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
-                    if cand_profits:
-                        try:
-                            profit_dict_sales = load_vehicle_profit(os.path.join(curr_dir, cand_profits[0]))
-                        except Exception:
-                            pass
                 
                 # Optional Stock file (User upload or local workspace fallback)
                 stock_dict_sales, fin_coy_sales, vin_dict_sales = ({}, {}, {})
