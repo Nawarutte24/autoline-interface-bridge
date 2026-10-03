@@ -3480,49 +3480,43 @@ with tab_aftersales:
 # =============================================================================
 with tab_sales:
     # -------------------------------------------------------------------------
-    # 1. MANDATORY INPUTS (2 FILES)
+    # UPLOAD FILES SECTION
     # -------------------------------------------------------------------------
-    st.markdown("### 🔴 ไฟล์จำเป็น (Mandatory Inputs - ใช้เพียง 2 ไฟล์)")
-    col_m1, col_m2 = st.columns(2)
-    with col_m1:
+    st.markdown("### 📁 Upload ไฟล์")
+    col1, col2 = st.columns(2)
+    with col1:
         st.markdown("**1. รายงานภาษีขาย (Sales VAT Report)**")
-        st.caption("เช่น `2026VatReport(Branch1.1).xlsx`... (รองรับเลือกหลายไฟล์พร้อมกันเพื่อรวมทุกสาขา) *จำเป็น")
+        st.caption("เช่น `2026VatReport(Branch1.1).xlsx`... (รองรับเลือกหลายไฟล์พร้อมกันเพื่อรวมทุกสาขา)")
         vat_files = st.file_uploader(
             "เลือกไฟล์รายงานภาษีขาย (.xlsx / .xls) (เลือกได้หลายไฟล์พร้อมกัน)", 
             type=["xlsx", "xls"], 
             accept_multiple_files=True,
             key="sales_vat_upload"
         )
-    with col_m2:
+    with col2:
         st.markdown("**2. บัญชีแยกประเภททุกหมวด (All Category GL Report)**")
-        st.caption("เช่น `บัญชีแยกประเภท2026(AllCategory).xlsx` (ไฟล์เดียวครอบคลุมจัดหมวดบิล 0XD และดึงต้นทุน/สต๊อก/VIN บิล 0XWG ครบ 100%) *จำเป็น")
+        st.caption("เช่น `บัญชีแยกประเภท2026(AllCategory).xlsx` (ครอบคลุมบิล 0XD และดึงต้นทุน/สต๊อก/VIN บิล 0XWG)")
         gl_file = st.file_uploader(
             "เลือกไฟล์บัญชีแยกประเภททุกหมวด (.xlsx / .xls)", 
             type=["xlsx", "xls"], 
             key="sales_gl_upload"
         )
         
-    # -------------------------------------------------------------------------
-    # 2. OPTIONAL INPUTS (2 FILES)
-    # -------------------------------------------------------------------------
-    st.markdown("### 🟡 ไฟล์เสริม (Optional Inputs)")
-    st.caption("เสริมข้อมูลเพื่อดึงเลขสต๊อก (Stock No), เลขตัวถัง (VIN) และต้นทุนรถยนต์เพิ่มเติม (หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)")
-    with st.expander("📁 อัปโหลดไฟล์เสริม (Optional - หากไม่อัปโหลด ระบบจะดึงจากโฟลเดอร์ให้อัตโนมัติ)", expanded=True):
-        col_o1, col_o2 = st.columns(2)
-        with col_o1:
-            st.markdown("**3. ไฟล์รายงานยอดการขาย(CarDetail)**")
-            stock_file = st.file_uploader(
-                "เลือกไฟล์รายงานยอดการขาย(CarDetail) (.xlsx / .xls)", 
-                type=["xlsx", "xls"], 
-                key="sales_stock_upload"
-            )
-        with col_o2:
-            st.markdown("**4. รายละเอียดต้นทุน(TOTAL COSTS - NEW)**")
-            cost_file = st.file_uploader(
-                "เลือกไฟล์รายละเอียดต้นทุน (.xlsx / .xls)", 
-                type=["xlsx", "xls"], 
-                key="sales_cost_upload"
-            )
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("**3. ไฟล์รายงานยอดการขาย(CarDetail)**")
+        stock_file = st.file_uploader(
+            "เลือกไฟล์รายงานยอดการขาย(CarDetail) (.xlsx / .xls)", 
+            type=["xlsx", "xls"], 
+            key="sales_stock_upload"
+        )
+    with col4:
+        st.markdown("**4. รายละเอียดต้นทุน(TOTAL COSTS - NEW)**")
+        cost_file = st.file_uploader(
+            "เลือกไฟล์รายละเอียดต้นทุน (.xlsx / .xls)", 
+            type=["xlsx", "xls"], 
+            key="sales_cost_upload"
+        )
         
     # -------------------------------------------------------------------------
     # 3. ADVANCED CONFIGURATION EXPANDER
