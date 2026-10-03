@@ -1590,6 +1590,49 @@ def classify_description_text(desc):
         
     return 'DEPOSIT'
 
+def classify_sales_file(file_or_stream, filename=""):
+    """
+    Intelligently classifies an uploaded Excel file into one of:
+    - 'VAT'   : Sales VAT Report (e.g. 2026VatReport...)
+    - 'GL'    : All Category General Ledger (e.g. บัญชีแยกประเภท2026(AllCategory)...)
+    - 'STOCK' : CarDetail / TestData / StockNumber (e.g. รายงานยอดการขาย(CarDetail), TestData...)
+    - 'COST'  : Master Cost Detail (e.g. รายละเอียดต้นทุน, VehicleCost...)
+    - 'UNKNOWN'
+    """
+    fn = filename.lower()
+    # Priority 1: Filename patterns
+    if any(k in fn for k in ['vatreport', 'ภาษีขาย', 'salevat', 'vat_report']):
+        return 'VAT'
+    if any(k in fn for k in ['บัญชีแยกประเภท', 'allcategory', 'generalledger']):
+        return 'GL'
+    if any(k in fn for k in ['cardetail', 'รายงานยอดการขาย', 'testdata', 'stocknumber']):
+        return 'STOCK'
+    if any(k in fn for k in ['รายละเอียดต้นทุน', 'vehiclecost', 'total costs']):
+        return 'COST'
+        
+    # Priority 2: Inspect content if filename is generic
+    try:
+        if hasattr(file_or_stream, "seek"):
+            file_or_stream.seek(0)
+        wb = openpyxl.load_workbook(file_or_stream, read_only=True, data_only=True)
+        ws = wb.active
+        sample_rows = list(ws.iter_rows(max_row=5, values_only=True))
+        if hasattr(file_or_stream, "seek"):
+            file_or_stream.seek(0)
+        text_dump = ' '.join(str(c) for r in sample_rows for c in r if c).lower()
+        if any(w in text_dump for w in ['ใบกำกับ', 'ภาษี', 'ผู้ซื้อสินค้า', 'vatreport']):
+            return 'VAT'
+        if any(w in text_dump for w in ['สมุดรายวัน', 'เลขที่บัญชี', 'เดบิต', 'เครดิต', 'บัญชีแยกประเภท']):
+            return 'GL'
+        if any(w in text_dump for w in ['v43', 'list รายละเอียดต้นทุนรถ', 'สถานะสต็อค']):
+            return 'COST'
+        if any(w in text_dump for w in ['base', 'fltclm', 'net sale', 'stock no', 'cust inv']):
+            return 'STOCK'
+    except Exception:
+        if hasattr(file_or_stream, "seek"):
+            file_or_stream.seek(0)
+    return 'UNKNOWN'
+
 def load_sales_vat_report(file_or_files):
     if not isinstance(file_or_files, (list, tuple)):
         file_list = [file_or_files]
@@ -3480,43 +3523,95 @@ with tab_aftersales:
 # =============================================================================
 with tab_sales:
     # -------------------------------------------------------------------------
-    # UPLOAD FILES SECTION
+    # UPLOAD FILES SECTION (SINGLE MULTI-FILE UPLOADER WITH 2x2 AUTO-CLASSIFICATION)
     # -------------------------------------------------------------------------
     st.markdown("### 📁 Upload ไฟล์")
+    st.caption("สามารถเลือกหรือลากไฟล์ Excel ทั้งหมดมาวางที่ช่องนี้ในครั้งเดียว ระบบจะจำแนกประเภทไฟล์ให้อัตโนมัติ")
+    
+    uploaded_batch = st.file_uploader(
+        "เลือกหรือลากไฟล์ Excel ทั้งหมดมาวางที่นี่ (.xlsx / .xls) (เลือกได้หลายไฟล์พร้อมกัน)",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        key="sales_batch_upload"
+    )
+
+    # Classify files from the uploaded batch
+    vat_files = []
+    gl_file = None
+    stock_file = None
+    cost_file = None
+    unclassified_files = []
+    
+    if uploaded_batch:
+        for f in uploaded_batch:
+            ftype = classify_sales_file(f, f.name)
+            if ftype == 'VAT':
+                vat_files.append(f)
+            elif ftype == 'GL' and gl_file is None:
+                gl_file = f
+            elif ftype == 'STOCK' and stock_file is None:
+                stock_file = f
+            elif ftype == 'COST' and cost_file is None:
+                cost_file = f
+            else:
+                unclassified_files.append(f.name)
+
+    # Check local workspace fallbacks for Stock and Cost if not uploaded
+    curr_dir = os.path.dirname(__file__) if "__file__" in locals() else "."
+    auto_stock_name = None
+    if not stock_file:
+        for kw in ["TestData", "CarDetail", "รายงานยอดการขาย", "StockNumber"]:
+            cand = [f for f in os.listdir(curr_dir) if kw.lower() in f.lower() and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
+            if cand:
+                auto_stock_name = cand[0]
+                break
+
+    auto_cost_name = None
+    if not cost_file:
+        for kw in ["รายละเอียดต้นทุน", "VehicleCost"]:
+            cand = [f for f in os.listdir(curr_dir) if kw.lower() in f.lower() and f.endswith((".xlsx", ".xls")) and not f.startswith("~$")]
+            if cand:
+                auto_cost_name = cand[0]
+                break
+
+    # 2x2 Status Display Grid
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**1. รายงานภาษีขาย (Sales VAT Report)**")
-        st.caption("เช่น `2026VatReport(Branch1.1).xlsx`... (รองรับเลือกหลายไฟล์พร้อมกันเพื่อรวมทุกสาขา)")
-        vat_files = st.file_uploader(
-            "เลือกไฟล์รายงานภาษีขาย (.xlsx / .xls) (เลือกได้หลายไฟล์พร้อมกัน)", 
-            type=["xlsx", "xls"], 
-            accept_multiple_files=True,
-            key="sales_vat_upload"
-        )
+        if vat_files:
+            file_names_str = ", ".join([f"`{f.name}`" for f in vat_files])
+            st.success(f"✅ ตรวจพบ {len(vat_files)} ไฟล์: {file_names_str}")
+        else:
+            st.info("⏳ รออัปโหลดไฟล์ (เช่น `2026VatReport...xlsx`)")
+
     with col2:
         st.markdown("**2. บัญชีแยกประเภททุกหมวด (All Category GL Report)**")
-        st.caption("เช่น `บัญชีแยกประเภท2026(AllCategory).xlsx` (ครอบคลุมบิล 0XD และดึงต้นทุน/สต๊อก/VIN บิล 0XWG)")
-        gl_file = st.file_uploader(
-            "เลือกไฟล์บัญชีแยกประเภททุกหมวด (.xlsx / .xls)", 
-            type=["xlsx", "xls"], 
-            key="sales_gl_upload"
-        )
-        
+        if gl_file:
+            st.success(f"✅ ตรวจพบ: `{gl_file.name}`")
+        else:
+            st.info("⏳ รออัปโหลดไฟล์ (เช่น `บัญชีแยกประเภท2026(AllCategory).xlsx`)")
+
     col3, col4 = st.columns(2)
     with col3:
         st.markdown("**3. ไฟล์รายงานยอดการขาย(CarDetail)**")
-        stock_file = st.file_uploader(
-            "เลือกไฟล์รายงานยอดการขาย(CarDetail) (.xlsx / .xls)", 
-            type=["xlsx", "xls"], 
-            key="sales_stock_upload"
-        )
+        if stock_file:
+            st.success(f"✅ ตรวจพบจากการอัปโหลด: `{stock_file.name}`")
+        elif auto_stock_name:
+            st.info(f"📁 ใช้ไฟล์ในโฟลเดอร์อัตโนมัติ: `{auto_stock_name}`")
+        else:
+            st.caption("⚪ ไม่ได้อัปโหลด (ระบบประมวลผลต่อได้)")
+
     with col4:
         st.markdown("**4. รายละเอียดต้นทุน(TOTAL COSTS - NEW)**")
-        cost_file = st.file_uploader(
-            "เลือกไฟล์รายละเอียดต้นทุน (.xlsx / .xls)", 
-            type=["xlsx", "xls"], 
-            key="sales_cost_upload"
-        )
+        if cost_file:
+            st.success(f"✅ ตรวจพบจากการอัปโหลด: `{cost_file.name}`")
+        elif auto_cost_name:
+            st.info(f"📁 ใช้ไฟล์ในโฟลเดอร์อัตโนมัติ: `{auto_cost_name}`")
+        else:
+            st.caption("⚪ ไม่ได้อัปโหลด (ระบบประมวลผลต่อได้)")
+
+    if unclassified_files:
+        st.warning(f"⚠️ มีไฟล์ที่ไม่สามารถจำแนกประเภทได้: {', '.join(unclassified_files)}")
         
     # -------------------------------------------------------------------------
     # 3. ADVANCED CONFIGURATION EXPANDER
