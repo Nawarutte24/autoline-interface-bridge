@@ -3156,12 +3156,18 @@ with tab_aftersales:
 
                 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+                by_branch = summary_stats.get("by_branch", {})
+                b1_data = by_branch.get("0001", {"rows": [], "total_documents": 0})
+                b2_data = by_branch.get("0002", {"rows": [], "total_documents": 0})
+                b1_count = b1_data.get("total_documents", 0)
+                b2_count = b2_data.get("total_documents", 0)
+
+                dp_af_branches = split_rows_by_dealerpro_branch(rows_to_write)
+                target_pfxs = ["01", "02", "03", "04", "05"]
+                all_pfxs = sorted(set(target_pfxs).union(set(dp_af_branches.keys())))
+
                 if af_dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
                     st.caption("แบ่งไฟล์ตามรหัสสาขา DealerPro ทั้ง 5 (อ้างอิงจากเลข Invoice 01..., 02..., 03..., 04..., 05...) พร้อมรันเลข Batch เริ่มจาก 1 ในแต่ละไฟล์")
-                    dp_af_branches = split_rows_by_dealerpro_branch(rows_to_write)
-                    target_pfxs = ["01", "02", "03", "04", "05"]
-                    all_pfxs = sorted(set(target_pfxs).union(set(dp_af_branches.keys())))
-                    
                     cols_dp = st.columns(len(all_pfxs) + 1)
                     dp_excels = {}
                     
@@ -3201,11 +3207,6 @@ with tab_aftersales:
                             )
                 elif af_dl_choice == "🏢 แยกตามสาขา Autoline (Branch 0001 & 0002)":
                     st.caption("โครงสร้าง Autoline AR/AP (ARI / ARC) แบ่งตามสาขาใน Autoline: สาขา 01, 03, 04, 05 เข้า **Branch 0001** และ สาขา 02 เข้า **Branch 0002**")
-                    by_branch = summary_stats.get("by_branch", {})
-                    b1_data = by_branch.get("0001", {"rows": [], "total_documents": 0})
-                    b2_data = by_branch.get("0002", {"rows": [], "total_documents": 0})
-                    b1_count = b1_data["total_documents"]
-                    b2_count = b2_data["total_documents"]
 
                     col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
                     excel_b1 = None
@@ -3282,19 +3283,31 @@ with tab_aftersales:
                 st.markdown("### 🔍 ตรวจสอบข้อมูลก่อนดาวน์โหลด (Data Preview)")
                 col_pf1, col_pf2 = st.columns([1, 2])
                 with col_pf1:
-                    branch_filter_opt = st.selectbox(
-                        "กรองตามสาขา Autoline",
-                        ["ทุกสาขา (All)", f"Branch 0001 (สาขา 01, 03, 04, 05: {b1_count:,} ใบ)", f"Branch 0002 (สาขา 02: {b2_count:,} ใบ)"],
-                        key="af_branch_filter"
-                    )
+                    if af_dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
+                        dp_opts = ["ทุกสาขา (All)"] + [
+                            f"สาขา {pfx} ({dp_af_branches.get(pfx, {}).get('total_documents', 0):,} ฉบับ)"
+                            for pfx in all_pfxs if dp_af_branches.get(pfx, {}).get('total_documents', 0) > 0
+                        ]
+                        branch_filter_opt = st.selectbox("กรองตามสาขา DealerPro", dp_opts, key="af_branch_filter_dp")
+                    else:
+                        branch_filter_opt = st.selectbox(
+                            "กรองตามสาขา Autoline",
+                            ["ทุกสาขา (All)", f"Branch 0001 (สาขา 01, 03, 04, 05: {b1_count:,} ใบ)", f"Branch 0002 (สาขา 02: {b2_count:,} ใบ)"],
+                            key="af_branch_filter"
+                        )
                 with col_pf2:
                     search_kw = st.text_input("ค้นหาเอกสาร (เลขที่บิล, ใบลดหนี้, เลขที่อ้างอิง, ชื่อลูกค้า หรือ Doc Code)", placeholder="เช่น 01SC26050001, ARC, HA0027, SINVOICV", key="af_search")
                 
                 display_df = preview_df
-                if "Branch 0001" in branch_filter_opt:
-                    display_df = display_df[display_df["Branch"] == "0001"]
-                elif "Branch 0002" in branch_filter_opt:
-                    display_df = display_df[display_df["Branch"] == "0002"]
+                if af_dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
+                    if branch_filter_opt != "ทุกสาขา (All)":
+                        sel_pfx = branch_filter_opt.split()[1]
+                        display_df = display_df[display_df["Invoice"].astype(str).str.startswith(sel_pfx)]
+                else:
+                    if "Branch 0001" in branch_filter_opt:
+                        display_df = display_df[display_df["Branch"] == "0001"]
+                    elif "Branch 0002" in branch_filter_opt:
+                        display_df = display_df[display_df["Branch"] == "0002"]
 
                 if search_kw.strip():
                     kw = search_kw.strip().lower()
@@ -3382,12 +3395,18 @@ with tab_aftersales:
 
                         now_p_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+                        by_branch_parts = stats_parts.get("by_branch", {})
+                        pb1_data = by_branch_parts.get("0001", {"rows": [], "total_documents": 0})
+                        pb2_data = by_branch_parts.get("0002", {"rows": [], "total_documents": 0})
+                        pb1_count = pb1_data.get("total_documents", 0)
+                        pb2_count = pb2_data.get("total_documents", 0)
+
+                        dp_parts_branches = split_rows_by_dealerpro_branch(rows_parts)
+                        target_pfxs = ["01", "02", "03", "04", "05"]
+                        all_pfxs = sorted(set(target_pfxs).union(set(dp_parts_branches.keys())))
+
                         if parts_dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
                             st.caption("แบ่งไฟล์ตามรหัสสาขา DealerPro ทั้ง 5 (อ้างอิงจากเลข Invoice 01..., 02..., 03..., 04..., 05...) พร้อมรันเลข Batch เริ่มจาก 1 ในแต่ละไฟล์")
-                            dp_parts_branches = split_rows_by_dealerpro_branch(rows_parts)
-                            target_pfxs = ["01", "02", "03", "04", "05"]
-                            all_pfxs = sorted(set(target_pfxs).union(set(dp_parts_branches.keys())))
-                            
                             cols_pdp = st.columns(len(all_pfxs) + 1)
                             dp_parts_excels = {}
                             
@@ -3427,11 +3446,6 @@ with tab_aftersales:
                                     )
                         elif parts_dl_choice == "🏢 แยกตามสาขา Autoline (Branch 0001 & 0002)":
                             st.caption("โครงสร้าง Autoline AR Journal Import แบ่งตามสาขา: สาขา 01, 03, 04, 05 เข้า **Branch 0001** และ สาขา 02 เข้า **Branch 0002**")
-                            by_branch_parts = stats_parts.get("by_branch", {})
-                            pb1_data = by_branch_parts.get("0001", {"rows": [], "total_documents": 0})
-                            pb2_data = by_branch_parts.get("0002", {"rows": [], "total_documents": 0})
-                            pb1_count = pb1_data["total_documents"]
-                            pb2_count = pb2_data["total_documents"]
 
                             col_pdl1, col_pdl2, col_pdl3, col_pdl4 = st.columns(4)
                             excel_pb1 = None
@@ -3508,11 +3522,18 @@ with tab_aftersales:
                         st.markdown("### 🔍 ตรวจสอบข้อมูลรายการขายอะไหล่ (Parts Data Preview)")
                         col_ppf1, col_ppf2 = st.columns([1, 2])
                         with col_ppf1:
-                            parts_branch_filter = st.selectbox(
-                                "กรองตามสาขา Autoline",
-                                ["ทุกสาขา (All)", f"Branch 0001 (สาขา 01, 03, 04, 05: {pb1_count:,} ใบ)", f"Branch 0002 (สาขา 02: {pb2_count:,} ใบ)"],
-                                key="parts_branch_filter"
-                            )
+                            if parts_dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
+                                p_dp_opts = ["ทุกสาขา (All)"] + [
+                                    f"สาขา {pfx} ({dp_parts_branches.get(pfx, {}).get('total_documents', 0):,} ฉบับ)"
+                                    for pfx in all_pfxs if dp_parts_branches.get(pfx, {}).get('total_documents', 0) > 0
+                                ]
+                                parts_branch_filter = st.selectbox("กรองตามสาขา DealerPro", p_dp_opts, key="parts_branch_filter_dp")
+                            else:
+                                parts_branch_filter = st.selectbox(
+                                    "กรองตามสาขา Autoline",
+                                    ["ทุกสาขา (All)", f"Branch 0001 (สาขา 01, 03, 04, 05: {pb1_count:,} ใบ)", f"Branch 0002 (สาขา 02: {pb2_count:,} ใบ)"],
+                                    key="parts_branch_filter"
+                                )
                         with col_ppf2:
                             parts_search_kw = st.text_input(
                                 "ค้นหาเอกสาร (เลขที่บิล, ชื่อลูกค้า, รหัส GL, Subaccount หรือ Narrative)",
@@ -3521,10 +3542,15 @@ with tab_aftersales:
                             )
 
                         display_parts_df = preview_parts.copy()
-                        if "Branch 0001" in parts_branch_filter:
-                            display_parts_df = display_parts_df[display_parts_df["Branch"] == "0001"]
-                        elif "Branch 0002" in parts_branch_filter:
-                            display_parts_df = display_parts_df[display_parts_df["Branch"] == "0002"]
+                        if parts_dl_choice == "🏬 แยกตามสาขา DealerPro ทั้ง 5 (Branch 01, 02, 03, 04, 05)":
+                            if parts_branch_filter != "ทุกสาขา (All)":
+                                sel_p_pfx = parts_branch_filter.split()[1]
+                                display_parts_df = display_parts_df[display_parts_df["Invoice"].astype(str).str.startswith(sel_p_pfx)]
+                        else:
+                            if "Branch 0001" in parts_branch_filter:
+                                display_parts_df = display_parts_df[display_parts_df["Branch"] == "0001"]
+                            elif "Branch 0002" in parts_branch_filter:
+                                display_parts_df = display_parts_df[display_parts_df["Branch"] == "0002"]
 
                         if parts_search_kw.strip():
                             pkw = parts_search_kw.strip().lower()
